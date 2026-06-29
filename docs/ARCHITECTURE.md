@@ -1,0 +1,212 @@
+# ARCHITECTURE — Pigeon Mobile
+
+The structural map of the Pigeon mobile client: *what parts exist, where, and how they fit*. For the rules and conventions see [`../CLAUDE.md`](../CLAUDE.md); for the plan see [`../ROADMAP.md`](../ROADMAP.md). For the **protocol and the reused crates**, the authority is the homeserver repo ([`../../pigeon`](../../pigeon)).
+
+> Status note: this describes the **target** architecture. The project is at Phase M0 (foundations) — most of what follows is not built yet. Keep this doc in sync as code lands (CLAUDE.md doc-sync rule).
+
+## 1. The one big idea
+
+Everything that is **not UI** lives once, in a shared **Rust core**, and is called from each platform through **UniFFI**-generated bindings. The platforms add only UI and OS integration.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    pigeon-mobile-core  (Rust)                     │
+│                                                                   │
+│   reuses:   pigeon-crypto  (MLS / openmls — client-side E2EE)     │
+│             pigeon-core    (event types, canonical JSON, hashing) │
+│                                                                   │
+│   owns:     session/auth · the /sync loop · room & timeline model │
+│             key mgmt (upload/query/claim) · to-device/Welcome     │
+│             encrypted backup/restore · media · local SQLite store │
+│             the Client–Server HTTP API client (reqwest+rustls)    │
+│                                                                   │
+│   exposes:  a small, typed UniFFI surface (functions + observers) │
+└─────────────────────────────────────────────────────────────────┘
+        │  UniFFI codegen                       │  UniFFI codegen
+        ▼  Kotlin bindings + per-ABI .so        ▼  Swift bindings + xcframework
+┌───────────────────────────────┐    ┌───────────────────────────────┐
+│   android/  (Kotlin)          │    │   ios/  (Swift, Phase M5)     │
+│   Jetpack Compose UI          │    │   SwiftUI                      │
+│   view-models → core          │    │   view-models → core          │
+│   FCM · Keystore · pickers    │    │   APNs · Keychain · pickers    │
+└───────────────────────────────┘    └───────────────────────────────┘
+                         │ HTTPS, token auth
+                         ▼
+        Pigeon homeserver   /_pigeon/client/v1/*   (one homeserver per user)
+```
+
+**Why this shape:** the client must do MLS E2EE on-device, and a tested MLS engine already exists in `pigeon-crypto` (Rust). Reimplementing it in Kotlin and again in Swift would duplicate security-critical crypto and risk federation incompatibility. Sharing the Rust core means crypto and protocol logic exist once; iOS becomes mostly UI work. This is the `matrix-rust-sdk` model.
+
+## 2. Trust & data-flow boundaries
+
+Three boundaries, each with a distinct trust posture:
+
+1. **App ↔ Core (the FFI boundary).** Same process, same trust domain, but a *real cost boundary* (marshalling, codegen). Keep it **coarse and typed**: "load timeline page," "send message," "run one sync → diff," not per-field chatter. Secrets (private keys, tokens) stay *inside* the core + platform keystore — they do not cross into long-lived app-level state. (CLAUDE.md Gotcha #1, #7.)
+2. **Core ↔ Homeserver (the network boundary).** HTTPS, token auth, the Client–Server API only. The network is hostile and flaky → offline-first: the store answers reads, the sync loop reconciles, sends queue and retry.
+3. **Homeserver ↔ Federation (not our boundary).** The app never speaks federation. Cross-server key fetch, message delivery, and media fetch are the *server's* responsibility. The client only ever talks to its own homeserver.
+
+End-to-end encryption means the homeserver — and every server in the federation — sees only ciphertext for encrypted rooms. The plaintext exists only inside the core (and the local store) on the device.
+
+## 3. Repository layout
+
+```
+pigeon-mobile/
+├── CLAUDE.md                     # rulebook
+├── ROADMAP.md                    # plan
+├── README.md                     # front door (added when runnable)
+├── docs/
+│   └── ARCHITECTURE.md           # this file
+├── core/                         # pigeon-mobile-core — the shared Rust crate
+│   ├── Cargo.toml                # crate-type = ["cdylib","staticlib"]; deps incl. pigeon-crypto, pigeon-core
+│   ├── pigeon_mobile_core.udl    # UniFFI interface (or proc-macro attrs in lib.rs)
+│   ├── build.rs                  # UniFFI scaffolding generation
+│   └── src/
+│       ├── lib.rs                # crate root + UniFFI setup + public re-exports
+│       ├── ffi.rs                # UniFFI types: records, enums, errors, observer callbacks
+│       ├── api.rs                # Client–Server HTTP client (reqwest+rustls), P_-error mapping
+│       ├── session.rs            # register/login/logout, token+device_id lifecycle
+│       ├── sync.rs               # the /sync long-poll loop, token handling, store diffing
+│       ├── store.rs              # local persistence (SQLite): rooms, timeline, sync token
+│       ├── rooms.rs              # room list, create/join, timeline reads, send + send-queue
+│       ├── e2ee.rs               # thin wrapper over pigeon-crypto: groups, encrypt/decrypt, welcomes
+│       ├── keys.rs               # device keys + KeyPackage upload/query/claim
+│       ├── backup.rs             # encrypted device-state backup/restore (recovery key)
+│       └── media.rs              # media upload/download/thumbnails (opaque/encrypted)
+├── android/                      # the Android app
+│   ├── settings.gradle.kts
+│   ├── app/                      # Compose UI, view-models, navigation, DI
+│   └── core-bindings/            # generated Kotlin + bundled .so per ABI (build output)
+└── ios/                          # the iOS app (Phase M5)
+    ├── PigeonMobile.xcodeproj
+    └── Sources/                  # SwiftUI + generated Swift bindings + xcframework
+```
+
+`core/` must build and unit-test on the host with no device. It contains **no** platform APIs; the host installs side-effecting capabilities (logging, maybe keystore access) via UniFFI callback interfaces.
+
+## 4. The shared core (`core/`)
+
+### 4.1 Reused server crates
+
+| Crate (from `../../pigeon`) | What the mobile core uses it for |
+|---|---|
+| `pigeon-crypto` | The client-side MLS engine: `Device`, group create/join, `add_member`→Welcome, `encrypt`/`decrypt`, export/restore storage, encrypted backup (recovery key). The core does **not** reimplement any of this. |
+| `pigeon-core` | Event types, content structs, canonical JSON (for anything signed), event-id hashing — to construct/interpret events identically to the server. |
+
+Depend on these by path (monorepo-adjacent) or pinned git rev — decided and documented in M0.1. The mobile client must track a **server protocol version** and update deliberately on a `v1→v2` bump.
+
+### 4.2 Module responsibilities
+
+- **`api.rs`** — the only place that makes HTTP calls. Owns the homeserver base URL, token injection, ret/timeout policy, and maps `P_*` error codes → typed core errors. Models its calls on the reference CLI (`../../pigeon/clients/cli`).
+- **`session.rs`** — register/login/logout; produces a session (token, device_id, server). Secrets handed to the platform keystore via a callback; never persisted in clear.
+- **`sync.rs`** — the long-poll `/sync` loop. Treats the composite sync token as opaque (Gotcha #5), diffs the response into the store, emits change events to the host observer, and propagates cancellation when the app backgrounds (Gotcha #6).
+- **`store.rs`** — local SQLite. Source of truth for reads (offline-first). Holds rooms, timeline events (incl. **decrypted plaintext cached on first decrypt** — Gotcha #3), membership, and the sync token.
+- **`rooms.rs`** — room list, create/join, paginated timeline reads, send (with local echo + a retrying send queue).
+- **`e2ee.rs`** — the bridge to `pigeon-crypto`: maintains the per-room MLS group (group_id = room_id bytes), encrypts outbound to `p.room.encrypted`, decrypts inbound, processes `p.mls.welcome`. Idempotent on at-least-once to-device delivery (Gotcha #8).
+- **`keys.rs`** — generates/publishes device identity + KeyPackages (`/keys/upload`); queries/claims peers' keys (`/keys/query`, `/keys/claim`).
+- **`backup.rs`** — wraps `pigeon-crypto`'s recovery-key backup: produce a recovery key + encrypted blob, store via the key-backup endpoints, and restore identity+groups on a fresh device.
+- **`media.rs`** — upload (size-cap aware → 413), download by `pigeon://server/id` URI, thumbnails; client-side encryption for encrypted rooms (server stores opaque bytes).
+- **`ffi.rs`** — the UniFFI surface: records (DTOs the UI renders), error enums, and **observer/callback interfaces** for the host (sync change stream, logging sink, keystore access).
+
+### 4.3 The FFI surface (illustrative — not final)
+
+Keep it small, coarse, and stable. Sketch:
+
+```
+// session
+fn register(server: String, username: String, password: String) -> Session
+fn login(server: String, username: String, password: String) -> Session
+fn restore_session() -> Session?            // from keystore on launch
+fn logout()
+
+// sync (async; emits diffs to the observer)
+fn start_sync(observer: SyncObserver)        // long-poll loop, cancelable
+fn stop_sync()
+
+// rooms & timeline (reads served from the local store)
+fn rooms() -> [RoomSummary]
+fn timeline(room_id: String, page: PageCursor) -> TimelinePage
+fn create_room(opts: CreateRoomOpts) -> String   // returns room_id
+fn join_room(room_id_or_alias: String)
+fn invite(room_id: String, user_id: String)
+fn send_message(room_id: String, body: String)   // plaintext OR encrypted, decided by room state
+
+// e2ee is transparent: send/receive route through e2ee.rs based on the room's
+// p.room.encryption marker — the UI does not branch on encryption.
+
+// media
+fn upload_media(bytes: [u8], content_type: String) -> String   // returns pigeon:// URI
+fn download_media(uri: String) -> MediaBlob
+
+// backup / restore
+fn create_backup() -> RecoveryKey
+fn restore_from_backup(recovery_key: String)
+
+// host-provided capabilities (callback interfaces the app implements)
+interface SyncObserver { fn on_change(diff: SyncDiff); fn on_error(e: CoreError); }
+interface LogSink      { fn log(level: LogLevel, target: String, msg: String); }
+interface KeyStore     { fn put(key: String, value: [u8]); fn get(key: String) -> [u8]?; }
+```
+
+Encryption is **transparent**: `send_message`/timeline reads route through `e2ee.rs` based on the room's `p.room.encryption` marker. The UI never branches on "encrypted vs not" beyond showing an indicator.
+
+## 5. The Android app (`android/`)
+
+- **UI:** Jetpack Compose. Screens: homeserver/auth, room list, chat/timeline, room create, invite, media viewer, settings, backup/restore.
+- **View-models:** translate UI intent → coarse core calls; collect the core's `SyncObserver` diffs into Compose state (a `Flow`/`StateFlow`). No protocol logic here — only presentation.
+- **OS integration:** Android Keystore (implements the core's `KeyStore` callback), FCM (push → wake/sync), photo/file pickers, sharing, foreground/background lifecycle (drives `start_sync`/`stop_sync`), biometric unlock (optional).
+- **Bindings:** generated Kotlin + the per-ABI `.so` (`arm64-v8a`, `armeabi-v7a`, `x86_64` for the emulator), produced by the build pipeline (§7).
+
+## 6. The iOS app (`ios/`, Phase M5)
+
+Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI UI + Apple OS glue: Keychain (the `KeyStore` callback), APNs, native pickers/sharing, background refresh driving the sync loop. **No protocol or crypto code in Swift** — if any is needed, the FFI boundary leaked and the fix belongs in the core (benefiting Android too).
+
+## 7. Build & codegen pipeline
+
+```
+   core/ (Rust)
+      │  1. cargo build  (host: tests;  cargo-ndk: per-ABI .so;  iOS targets: static libs)
+      │  2. uniffi-bindgen  →  Kotlin bindings (Android)  /  Swift bindings + xcframework (iOS)
+      ▼
+   android/  ← bundles .so + Kotlin bindings;  ./gradlew assembleDebug
+   ios/      ← links xcframework + Swift bindings;  xcodebuild
+```
+
+- **Android cross-compile:** `cargo-ndk` (NDK version + Rust targets + min SDK documented in M0). One Gradle task rebuilds the core, runs codegen, and bundles the `.so`s so `assembleDebug` is a single command.
+- **iOS cross-compile:** `cargo` for `aarch64-apple-ios` (+ simulator), packaged into an `xcframework`.
+- **CI lanes:** **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`), **android** (codegen + `assembleDebug` + lint), and later **ios** (xcframework + build). Aggressive caching.
+
+## 8. End-to-end flows (how the pieces cooperate)
+
+**Login (M1).** UI → `login()` → `api.rs` calls `/_pigeon/client/v1/login` → session returned → token+device_id stored in Keystore via the `KeyStore` callback → `start_sync()` begins.
+
+**Receiving a message (M2/M3).** `sync.rs` long-polls `/sync` → for an encrypted room, `e2ee.rs` decrypts the `p.room.encrypted` event via `pigeon-crypto` → **plaintext cached in the store** (Gotcha #3) → `store.rs` diff → `SyncObserver.on_change` → view-model updates Compose state → chat screen re-renders.
+
+**Sending an encrypted message (M3).** UI → `send_message()` → `rooms.rs` sees the room's `p.room.encryption` marker → `e2ee.rs` encrypts via the room's MLS group → `api.rs` sends `p.room.encrypted` → local echo into the store → render. The server stores only ciphertext.
+
+**Inviting to an encrypted room (M3).** `invite()` → `keys.rs` claims the invitee's KeyPackage (`/keys/claim`) → `e2ee.rs` `add_member` → resulting `Welcome` shipped over `/sendToDevice` (type `p.mls.welcome`). The invitee's core picks it up from `/sync` `to_device`, joins the group idempotently.
+
+**Device recovery (M4).** `create_backup()` → `backup.rs` produces a recovery key + encrypted blob (via `pigeon-crypto`) → stored via the key-backup endpoints. On a new device: `restore_from_backup(recovery_key)` → fetch blob → decrypt → identity + groups recovered → encrypted history decryptable from the backed-up epoch onward (forward-secrecy caveat documented).
+
+## 9. Where things live (quick index)
+
+| Concern | Lives in |
+|---|---|
+| MLS crypto | `pigeon-crypto` (reused), wrapped by `core/src/e2ee.rs` |
+| Event types / canonical JSON | `pigeon-core` (reused) |
+| HTTP / protocol calls | `core/src/api.rs` |
+| Sync loop | `core/src/sync.rs` |
+| Local data | `core/src/store.rs` (SQLite) + platform keystore for secrets |
+| FFI types & callbacks | `core/src/ffi.rs` + the `.udl` |
+| Android UI | `android/app/` |
+| iOS UI | `ios/Sources/` (M5) |
+| Build/codegen | `core/build.rs`, Gradle tasks, `cargo-ndk`, `uniffi-bindgen` |
+| Protocol contract (authoritative) | `../../pigeon` repo + its `clients/cli` |
+
+## 10. Open decisions (resolve as phases reach them)
+
+- Local store: `sqlx` vs `rusqlite` (M2). — flag the dep.
+- Core dependency on the server crates: path vs pinned git rev (M0).
+- UniFFI style: `.udl` file vs proc-macro attributes (M0).
+- Server discovery (`.well-known`) in the core: M1 or later.
+- Push contract: what the homeserver exposes for push (confirm with the server repo before M4.4).
+- Android min SDK / NDK version pin (M0).

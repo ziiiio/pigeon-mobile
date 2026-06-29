@@ -1,0 +1,42 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.orig
+*.rs.bk
+
+# UniFFI / generated bindings (regenerated from the core)
+**/generated/
+*.so
+*.a
+*.dylib
+*.xcframework/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.cxx/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# iOS / Xcode
+ios/build/
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Secrets / local config
+*.env
+.env.local
