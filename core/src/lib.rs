@@ -11,6 +11,8 @@
 
 uniffi::setup_scaffolding!();
 
+use std::sync::RwLock;
+
 use pigeon_crypto::Device;
 
 /// Errors surfaced across the FFI boundary.
@@ -21,6 +23,52 @@ use pigeon_crypto::Device;
 pub enum CoreError {
     #[error("crypto error: {message}")]
     Crypto { message: String },
+}
+
+// --- Logging (M0.7) ----------------------------------------------------------
+//
+// The core never assumes a platform logger. The host installs a sink (Logcat on
+// Android, os_log on iOS) via `set_log_sink`; the core emits structured records
+// to it. Keep message content free of PII/plaintext (CLAUDE.md Gotcha #2).
+
+/// Severity of a log record, mirroring `tracing` levels.
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+/// A host-provided log sink. The native layer implements this and forwards to
+/// the platform logger.
+#[uniffi::export(callback_interface)]
+pub trait LogSink: Send + Sync {
+    fn log(&self, level: LogLevel, target: String, message: String);
+}
+
+static LOG_SINK: RwLock<Option<Box<dyn LogSink>>> = RwLock::new(None);
+
+/// Install (or replace) the host log sink. Call once at startup.
+#[uniffi::export]
+pub fn set_log_sink(sink: Box<dyn LogSink>) {
+    *LOG_SINK.write().expect("log sink lock poisoned") = Some(sink);
+}
+
+/// Emit a record to the installed sink, if any. Internal helper — the real API
+/// will route `tracing` here in M1+; for now it backs `emit_test_log`.
+fn emit(level: LogLevel, target: &str, message: &str) {
+    if let Some(sink) = LOG_SINK.read().expect("log sink lock poisoned").as_ref() {
+        sink.log(level, target.to_string(), message.to_string());
+    }
+}
+
+/// Emit one INFO record through the installed sink. Lets the Hello-core app
+/// prove the host log callback round-trips end to end. (M0 verification only.)
+#[uniffi::export]
+pub fn emit_test_log(message: String) {
+    emit(LogLevel::Info, "pigeon_mobile_core", &message);
 }
 
 /// The core's version string.
@@ -58,5 +106,26 @@ mod tests {
         // pigeon-crypto / openmls dependency chain compiles and executes here.
         let len = self_test_crypto("@m0:test.example".to_string()).unwrap();
         assert_eq!(len, 32);
+    }
+
+    #[test]
+    fn log_sink_callback_round_trips() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Capturing(Arc<Mutex<Vec<String>>>);
+        impl LogSink for Capturing {
+            fn log(&self, _level: LogLevel, target: String, message: String) {
+                self.0.lock().unwrap().push(format!("{target}: {message}"));
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        set_log_sink(Box::new(Capturing(captured.clone())));
+        emit_test_log("hello from rust".to_string());
+
+        let lines = captured.lock().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "pigeon_mobile_core: hello from rust");
     }
 }
