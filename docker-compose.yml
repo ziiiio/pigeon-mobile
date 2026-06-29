@@ -1,15 +1,22 @@
-# Dev environment for pigeon-mobile — a persistent container for continuous
-# build/test cycles on the Rust core.
+# Dev environment for pigeon-mobile — persistent containers for continuous
+# build/test cycles.
 #
-#   docker compose build              # build the dev image
-#   docker compose up -d              # start the long-lived container
-#   docker compose exec dev <cmd>     # run a command inside it, e.g.:
-#   docker compose exec dev cargo test --manifest-path core/Cargo.toml
+# Two services because of a host-arch constraint: the Android NDK ships only
+# x86_64 Linux toolchain binaries, so the Android cross-compile must run in an
+# amd64 container (Rosetta-emulated on Apple Silicon). Core dev stays on the
+# fast native arch.
+#
+#   # day-to-day core work (native arch — fast):
+#   docker compose up -d dev
+#   docker compose exec -w /workspace/pigeon-mobile/core dev cargo test
+#
+#   # Android cross-compile + app build (amd64 — emulated):
+#   docker compose up -d android
+#   docker compose exec android bash -c 'cd android && ./gradlew assembleDebug'
 #
 # The whole projects/ directory is mounted so the core's path-dependencies on
-# ../pigeon resolve exactly as they do on the host. Cargo's registry and the
-# build target dir live in named volumes so they persist across restarts and
-# avoid slow bind-mount I/O for build artifacts.
+# ../pigeon resolve exactly as on the host. Cargo registry / target dirs and the
+# Gradle cache live in named volumes so they persist and avoid slow bind I/O.
 services:
   dev:
     build:
@@ -22,8 +29,27 @@ services:
       - /Users/hegel/Documents/projects:/workspace
       - cargo-registry:/usr/local/cargo/registry
       - core-target:/workspace/pigeon-mobile/core/target
+      - gradle-cache:/root/.gradle
+    command: sleep infinity
+
+  android:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pigeon-mobile-android
+    platform: linux/amd64
+    container_name: pigeon-mobile-android
+    working_dir: /workspace/pigeon-mobile
+    volumes:
+      - /Users/hegel/Documents/projects:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      # Separate target volume: amd64 artifacts must not mix with the arm64 dev's.
+      - core-target-amd64:/workspace/pigeon-mobile/core/target
+      - gradle-cache:/root/.gradle
     command: sleep infinity
 
 volumes:
   cargo-registry:
   core-target:
+  core-target-amd64:
+  gradle-cache:

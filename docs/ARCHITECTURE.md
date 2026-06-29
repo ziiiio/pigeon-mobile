@@ -171,16 +171,23 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI UI +
    ios/      ← links xcframework + Swift bindings;  xcodebuild
 ```
 
-- **Dev container (`docker/Dockerfile` + `docker-compose.yml`):** a persistent Rust dev environment for continuous build/test of the core. The host's `projects/` dir is bind-mounted at `/workspace` so the `../pigeon` path-deps resolve unchanged; cargo's registry and the core's `target/` live in named volumes for caching across restarts. Carries `rustfmt`/`clippy`. **Currently the lean Rust-only image** (M0.1/M0.2 — core build/test + UniFFI codegen); the Android NDK layer (cargo-ndk, M0.3) and a JDK/Gradle layer (M0.4+) are added to it as those stages land. Typical loop:
-  ```
-  docker compose up -d
-  docker compose exec -w /workspace/pigeon-mobile/core dev cargo test
-  docker compose exec -w /workspace/pigeon-mobile/core dev \
-    cargo run --bin uniffi-bindgen -- generate \
-      --library target/debug/libpigeon_mobile_core.so --language kotlin \
-      --out-dir target/bindings/kotlin
-  ```
-  (Run bindgen from the crate dir — it shells out to `cargo metadata`.)
+- **Dev containers (`docker/Dockerfile` + `docker-compose.yml`):** persistent environments for continuous build/test. The host's `projects/` dir is bind-mounted at `/workspace` so the `../pigeon` path-deps resolve unchanged; cargo registry/target and the Gradle cache live in named volumes for caching across restarts. The image carries the full toolchain: Rust + `rustfmt`/`clippy` + Android targets + `cargo-ndk`, JDK 17, Android SDK (platform/build-tools 34) + NDK 26, and Gradle. **Two services** because the NDK ships only x86_64 Linux binaries:
+  - `dev` — native arch (fast). Day-to-day core work:
+    ```
+    docker compose up -d dev
+    docker compose exec -w /workspace/pigeon-mobile/core dev cargo test
+    docker compose exec -w /workspace/pigeon-mobile/core dev \
+      cargo run --bin uniffi-bindgen -- generate \
+        --library target/debug/libpigeon_mobile_core.so --language kotlin \
+        --out-dir target/bindings/kotlin
+    ```
+    (Run bindgen from the crate dir — it shells out to `cargo metadata`.)
+  - `android` — `platform: linux/amd64` (Rosetta-emulated on Apple Silicon), so the NDK's x86_64 toolchain runs. The cross-compile + app build lane:
+    ```
+    docker compose up -d android
+    docker compose exec android bash -c 'cd android && ./gradlew assembleDebug'
+    ```
+  Each service has its own `core/target` volume so amd64 and native artifacts don't mix. (CI runs both lanes on native amd64 Linux runners — no emulation there.)
 - **Android cross-compile:** `cargo-ndk` (NDK version + Rust targets + min SDK documented in M0). One Gradle task rebuilds the core, runs codegen, and bundles the `.so`s so `assembleDebug` is a single command.
 - **iOS cross-compile:** `cargo` for `aarch64-apple-ios` (+ simulator), packaged into an `xcframework`.
 - **CI lanes:** **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`), **android** (codegen + `assembleDebug` + lint), and later **ios** (xcframework + build). Aggressive caching.
