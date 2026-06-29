@@ -1,0 +1,29 @@
+# Dev environment for pigeon-mobile — a persistent container for continuous
+# build/test cycles on the Rust core.
+#
+#   docker compose build              # build the dev image
+#   docker compose up -d              # start the long-lived container
+#   docker compose exec dev <cmd>     # run a command inside it, e.g.:
+#   docker compose exec dev cargo test --manifest-path core/Cargo.toml
+#
+# The whole projects/ directory is mounted so the core's path-dependencies on
+# ../pigeon resolve exactly as they do on the host. Cargo's registry and the
+# build target dir live in named volumes so they persist across restarts and
+# avoid slow bind-mount I/O for build artifacts.
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pigeon-mobile-dev
+    container_name: pigeon-mobile-dev
+    working_dir: /workspace/pigeon-mobile
+    volumes:
+      - /Users/hegel/Documents/projects:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - core-target:/workspace/pigeon-mobile/core/target
+    command: sleep infinity
+
+volumes:
+  cargo-registry:
+  core-target:

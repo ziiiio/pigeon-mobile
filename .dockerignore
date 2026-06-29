@@ -1,0 +1,13 @@
+# The Dockerfile COPYs nothing (sources are bind-mounted at runtime), so keep
+# the build context minimal.
+**/target/
+**/build/
+**/.gradle/
+**/generated/
+.git/
+.idea/
+.vscode/
+.DS_Store
+*.so
+*.a
+*.dylib

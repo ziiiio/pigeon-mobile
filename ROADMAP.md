@@ -30,15 +30,15 @@ The development plan for the Pigeon mobile client. **Android ships first; iOS fo
 
 The whole project's risk is concentrated here: proving the Rust-core-via-UniFFI pipeline works before any feature depends on it. Don't skip ahead.
 
-- [ ] **M0.1 — `pigeon-mobile-core` crate.** Create `core/` as a `cdylib`+`staticlib` Rust crate. Depend on the server workspace's `pigeon-core` and `pigeon-crypto` (path or git dep — decide and document). It must `cargo build` and `cargo test` on the host.
-- [ ] **M0.2 — UniFFI scaffolding.** Add UniFFI; expose one trivial function (e.g. `fn core_version() -> String`) and one error enum across the boundary. Generate Kotlin bindings.
-- [ ] **M0.3 — Android cross-compile.** `cargo-ndk` builds the `.so` for `arm64-v8a` + `x86_64` (emulator). Document the exact toolchain (NDK version, Rust targets, min SDK).
+- [x] **M0.1 — `pigeon-mobile-core` crate.** ✅ `core/` is a `lib`+`cdylib`+`staticlib` crate depending on `pigeon-core` and `pigeon-crypto` by **path** (`../../pigeon/crates/*`). Builds and `cargo test`s in the dev container; a `self_test_crypto` test creates a real `pigeon-crypto` `Device` and asserts its 32-byte Ed25519 key, proving the whole `openmls` chain links and runs inside the core.
+- [x] **M0.2 — UniFFI scaffolding.** ✅ UniFFI 0.28 in **proc-macro/library mode** (`uniffi::setup_scaffolding!()`, no `.udl`). Exposes `core_version()` + `self_test_crypto()` and a `CoreError` enum. Kotlin bindings generate from the built cdylib via the crate's own `uniffi-bindgen` bin (`coreVersion()` / `selfTestCrypto()` confirmed in the output).
+- [ ] **M0.3 — Android cross-compile.** `cargo-ndk` builds the `.so` for `arm64-v8a` + `x86_64` (emulator). Document the exact toolchain (NDK version, Rust targets, min SDK). *(Add the NDK layer to `docker/Dockerfile` here.)*
 - [ ] **M0.4 — Hello-core Android app.** A bare Jetpack Compose app that loads the `.so`, calls `core_version()`, and shows it on screen on an emulator. **This is the M0 success gate — the full pipeline round-trips.**
 - [ ] **M0.5 — Build glue.** A Gradle task (or cargo wrapper) that rebuilds the core, runs UniFFI codegen, and bundles the `.so` per ABI so `./gradlew assembleDebug` is one command.
-- [ ] **M0.6 — CI.** Two lanes: **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`) and **android** (codegen + `./gradlew assembleDebug` + lint). Cache aggressively.
+- [ ] **M0.6 — CI.** Two lanes: **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`) and **android** (codegen + `./gradlew assembleDebug` + lint). Cache aggressively. *(The dev image already carries `rustfmt`/`clippy`; the core lane can reuse it.)*
 - [ ] **M0.7 — FFI logging callback.** A host-installed log sink (so the core never assumes a platform logger). Wire it to Logcat on Android.
 
-**Exit criteria:** an emulator app displays a value computed in Rust; CI builds both lanes; the build is one command. No protocol code yet.
+**Exit criteria:** an emulator app displays a value computed in Rust; CI builds both lanes; the build is one command. No protocol code yet. **Progress:** the Rust→UniFFI→Kotlin half (M0.1/M0.2) is verified in a Docker dev container; the Android NDK/Gradle/emulator half (M0.3–M0.6) remains.
 
 ---
 

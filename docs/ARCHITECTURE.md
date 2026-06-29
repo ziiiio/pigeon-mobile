@@ -2,7 +2,7 @@
 
 The structural map of the Pigeon mobile client: *what parts exist, where, and how they fit*. For the rules and conventions see [`../CLAUDE.md`](../CLAUDE.md); for the plan see [`../ROADMAP.md`](../ROADMAP.md). For the **protocol and the reused crates**, the authority is the homeserver repo ([`../../pigeon`](../../pigeon)).
 
-> Status note: this describes the **target** architecture. The project is at Phase M0 (foundations) — most of what follows is not built yet. Keep this doc in sync as code lands (CLAUDE.md doc-sync rule).
+> Status note: this describes the **target** architecture. The project is at Phase M0 (foundations). **Built so far:** the `core/` crate, its UniFFI surface (`core_version`, `self_test_crypto`, `CoreError`), Kotlin binding generation, and a Docker dev container — i.e. the Rust→UniFFI→Kotlin pipeline (M0.1/M0.2), verified by `cargo test` + bindgen in the container. The Android NDK/Gradle/emulator half and everything past M0 is not built yet. Keep this doc in sync as code lands (CLAUDE.md doc-sync rule).
 
 ## 1. The one big idea
 
@@ -171,6 +171,16 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI UI +
    ios/      ← links xcframework + Swift bindings;  xcodebuild
 ```
 
+- **Dev container (`docker/Dockerfile` + `docker-compose.yml`):** a persistent Rust dev environment for continuous build/test of the core. The host's `projects/` dir is bind-mounted at `/workspace` so the `../pigeon` path-deps resolve unchanged; cargo's registry and the core's `target/` live in named volumes for caching across restarts. Carries `rustfmt`/`clippy`. **Currently the lean Rust-only image** (M0.1/M0.2 — core build/test + UniFFI codegen); the Android NDK layer (cargo-ndk, M0.3) and a JDK/Gradle layer (M0.4+) are added to it as those stages land. Typical loop:
+  ```
+  docker compose up -d
+  docker compose exec -w /workspace/pigeon-mobile/core dev cargo test
+  docker compose exec -w /workspace/pigeon-mobile/core dev \
+    cargo run --bin uniffi-bindgen -- generate \
+      --library target/debug/libpigeon_mobile_core.so --language kotlin \
+      --out-dir target/bindings/kotlin
+  ```
+  (Run bindgen from the crate dir — it shells out to `cargo metadata`.)
 - **Android cross-compile:** `cargo-ndk` (NDK version + Rust targets + min SDK documented in M0). One Gradle task rebuilds the core, runs codegen, and bundles the `.so`s so `assembleDebug` is a single command.
 - **iOS cross-compile:** `cargo` for `aarch64-apple-ios` (+ simulator), packaged into an `xcframework`.
 - **CI lanes:** **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`), **android** (codegen + `assembleDebug` + lint), and later **ios** (xcframework + build). Aggressive caching.
@@ -196,17 +206,17 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI UI +
 | HTTP / protocol calls | `core/src/api.rs` |
 | Sync loop | `core/src/sync.rs` |
 | Local data | `core/src/store.rs` (SQLite) + platform keystore for secrets |
-| FFI types & callbacks | `core/src/ffi.rs` + the `.udl` |
+| FFI types & callbacks | `#[uniffi::export]` in the relevant module (proc-macro mode — no `.udl`); shared records/errors collect in `core/src/ffi.rs` |
 | Android UI | `android/app/` |
 | iOS UI | `ios/Sources/` (M5) |
-| Build/codegen | `core/build.rs`, Gradle tasks, `cargo-ndk`, `uniffi-bindgen` |
+| Build/codegen | `docker/` dev container, the `uniffi-bindgen` bin (`core/src/bin/`), `cargo-ndk` (M0.3), Gradle tasks |
 | Protocol contract (authoritative) | `../../pigeon` repo + its `clients/cli` |
 
 ## 10. Open decisions (resolve as phases reach them)
 
+- ~~Core dependency on the server crates: path vs pinned git rev~~ → **path deps** (`../../pigeon/crates/*`), via the `/workspace` bind mount in the dev container (M0.1).
+- ~~UniFFI style: `.udl` vs proc-macro~~ → **proc-macro / library mode** (`uniffi::setup_scaffolding!()`, UniFFI 0.28), bindings generated from the built cdylib (M0.2).
 - Local store: `sqlx` vs `rusqlite` (M2). — flag the dep.
-- Core dependency on the server crates: path vs pinned git rev (M0).
-- UniFFI style: `.udl` file vs proc-macro attributes (M0).
 - Server discovery (`.well-known`) in the core: M1 or later.
 - Push contract: what the homeserver exposes for push (confirm with the server repo before M4.4).
-- Android min SDK / NDK version pin (M0).
+- Android min SDK / NDK version pin (M0.3).

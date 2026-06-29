@@ -76,7 +76,9 @@ docs/
 
 Update this section as the project progresses. Claude should refuse to add Phase N+1 features when working in Phase N unless explicitly asked.
 
-**Active phase: Phase M0 (foundations).** Nothing is built yet — these docs are the starting point. M0 is: stand up the `pigeon-mobile-core` crate, get UniFFI generating a trivial Kotlin binding, get a `.so` cross-compiled and loading inside a Hello-World Compose app, and wire CI. No protocol features until the toolchain round-trips end to end (Rust function → generated Kotlin → running on an emulator). See the Phase plan in `ROADMAP.md`.
+**Active phase: Phase M0 (foundations).** **Built:** the `pigeon-mobile-core` crate (path-deps on `pigeon-core`/`pigeon-crypto`), UniFFI 0.28 in proc-macro mode exposing `core_version`/`self_test_crypto`/`CoreError`, Kotlin binding generation from the cdylib, and a Docker dev container — all verified by `cargo test` + bindgen in the container (M0.1/M0.2). **Remaining M0:** the Android NDK cross-compile (`.so` via cargo-ndk, M0.3), the Hello-core Compose app loading it (M0.4), build glue (M0.5), CI (M0.6), and the FFI log callback (M0.7). No protocol features until the toolchain round-trips end to end (Rust → generated Kotlin → running on an emulator). See `ROADMAP.md`.
+
+**Dev workflow:** work in the Docker container so builds are reproducible and continuous — `docker compose up -d`, then `docker compose exec -w /workspace/pigeon-mobile/core dev cargo test` (and `cargo clippy`/`cargo fmt`). The parent `projects/` dir is mounted at `/workspace`, so the `../pigeon` path-deps resolve as on the host. See README "Building" and ARCHITECTURE §7.
 
 **Ordering rule:** M0 (toolchain) gates everything. Then M1 (session) → M2 (sync + plaintext rooms) → M3 (E2EE) → M4 (media + polish) → M5 (iOS). Do not start M3 (the crypto integration) until M1–M2 prove the core⇄UI boundary on real flows; do not start M5 (iOS) until the Android app is feature-complete enough to be worth mirroring.
 

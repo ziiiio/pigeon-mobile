@@ -1,0 +1,29 @@
+[package]
+name = "pigeon-mobile-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Shared Rust core for the Pigeon mobile client (UniFFI)"
+
+[lib]
+name = "pigeon_mobile_core"
+# lib: so the uniffi-bindgen bin can import the crate.
+# cdylib: the native library loaded by Android/iOS (and the bindgen source).
+# staticlib: for iOS static linking (Phase M5).
+crate-type = ["lib", "cdylib", "staticlib"]
+
+# Library-mode UniFFI: bindings are generated from the built cdylib by this bin,
+# so the bindgen version stays pinned to the `uniffi` dependency below.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+uniffi = { version = "0.28", features = ["cli"] }
+thiserror = "1"
+
+# Reused homeserver crates — the single source of crypto + protocol logic.
+# Path deps into the sibling `pigeon` repo (see ../docs/ARCHITECTURE.md §4.1).
+pigeon-core = { path = "../../pigeon/crates/core" }
+pigeon-crypto = { path = "../../pigeon/crates/crypto" }

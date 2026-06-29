@@ -14,7 +14,7 @@ Pigeon Mobile is a thin native UI over a **shared Rust core**. Everything that i
 
 ## Status
 
-🚧 **Phase M0 (foundations) — not yet usable.** The repository currently contains the planning docs. Work starts with standing up the Rust-core → UniFFI → Kotlin toolchain and a Hello-core app on an emulator.
+🚧 **Phase M0 (foundations) — not yet usable.** The Rust core builds and tests against the reused homeserver crypto crate, and UniFFI generates Kotlin bindings from it (verified in the Docker dev container). Still to come in M0: the Android NDK cross-compile, the Hello-core Compose app, build glue, and CI.
 
 See [`ROADMAP.md`](ROADMAP.md) for the phase plan (M0 toolchain → M1 identity → M2 plaintext messaging → M3 E2EE → M4 media/backup/push → M5 iOS → M6 hardening).
 
@@ -35,19 +35,34 @@ ROADMAP.md   # the phase plan
 
 ## Building
 
-> The toolchain is being established in Phase M0; these are the intended steps and will be confirmed as M0 lands.
+The [`pigeon`](../pigeon) homeserver repo must be checked out as a **sibling directory** — the core depends on its `pigeon-core` and `pigeon-crypto` crates by path.
 
-**Prerequisites:** Rust (workspace toolchain), Android SDK + NDK, [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk), and a checkout of the [`pigeon`](../pigeon) homeserver repo as a sibling directory (the core depends on its `pigeon-crypto` and `pigeon-core` crates).
+### Dev container (recommended)
+
+A Docker dev environment gives a reproducible toolchain and a persistent container for fast build/test cycles. It bind-mounts the parent `projects/` directory so the `../pigeon` path-deps resolve unchanged.
 
 ```bash
-# Core: build + test on the host (no device needed)
-cd core && cargo test
+docker compose build          # build the dev image (Rust toolchain + rustfmt/clippy)
+docker compose up -d          # start the persistent container
 
-# Android: rebuild the core, regenerate bindings, bundle the per-ABI .so, and build the app
-cd android && ./gradlew assembleDebug
+# Build + test the core:
+docker compose exec -w /workspace/pigeon-mobile/core dev cargo test
+
+# Generate Kotlin bindings from the built cdylib:
+docker compose exec -w /workspace/pigeon-mobile/core dev \
+  cargo run --bin uniffi-bindgen -- generate \
+    --library target/debug/libpigeon_mobile_core.so \
+    --language kotlin --out-dir target/bindings/kotlin
 ```
 
-Run on an emulator or device from Android Studio, or `./gradlew installDebug`.
+### Host (alternative)
+
+Needs Rust plus — for the Android steps (M0.3+) — the Android SDK + NDK and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
+
+```bash
+cd core && cargo test                 # build + test the core (no device needed)
+cd android && ./gradlew assembleDebug # Android app (once the app exists, M0.4+)
+```
 
 ## Running against a homeserver
 
