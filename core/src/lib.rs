@@ -21,8 +21,12 @@ use pigeon_crypto::Device;
 /// the server's `P_*` codes and crypto/IO failures) grows from M1 onward.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
-    #[error("crypto error: {message}")]
-    Crypto { message: String },
+    // NB: the field is `reason`, not `message` — UniFFI maps an error variant to
+    // a Kotlin `Throwable` subclass, and a field named `message` collides with
+    // `Throwable.message` (generates uncompilable bindings). Keep error fields
+    // off that reserved name.
+    #[error("crypto error: {reason}")]
+    Crypto { reason: String },
 }
 
 // --- Logging (M0.7) ----------------------------------------------------------
@@ -86,7 +90,7 @@ pub fn core_version() -> String {
 #[uniffi::export]
 pub fn self_test_crypto(user_id: String) -> Result<u32, CoreError> {
     let device = Device::new(&user_id).map_err(|e| CoreError::Crypto {
-        message: e.to_string(),
+        reason: e.to_string(),
     })?;
     Ok(device.signature_public_key().len() as u32)
 }

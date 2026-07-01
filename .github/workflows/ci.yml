@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast lane: lint + unit-test the Rust core on the native runner arch (no NDK,
+  # no Android SDK). Runs the same `cargo fmt`/`clippy`/`test` the dev container
+  # gates on locally.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      # The core path-depends on ../pigeon/crates/*, so check both repos out as
+      # siblings under the workspace (pigeon-mobile/ next to pigeon/).
+      # NOTE: set `repository` (and a token if private) to your homeserver repo.
+      - uses: actions/checkout@v4
+        with:
+          path: pigeon-mobile
+      - uses: actions/checkout@v4
+        with:
+          repository: your-org/pigeon
+          path: pigeon
+          # token: ${{ secrets.PIGEON_REPO_TOKEN }}   # if the repo is private
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pigeon-mobile/core
+
+      - name: fmt
+        working-directory: pigeon-mobile/core
+        # Scope to our package: `--all` would also format the sibling `pigeon`
+        # crates pulled in as path-deps, letting their style drift fail our lane.
+        run: cargo fmt -p pigeon-mobile-core --check
+      - name: clippy
+        working-directory: pigeon-mobile/core
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        working-directory: pigeon-mobile/core
+        run: cargo test
+
+  # Android lane: cross-compile the core (cargo-ndk) and assemble the app. The
+  # ubuntu runner is amd64, so the NDK's x86_64 toolchain runs natively (no
+  # emulation needed, unlike the Apple-Silicon dev container).
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pigeon-mobile
+      - uses: actions/checkout@v4
+        with:
+          repository: your-org/pigeon
+          path: pigeon
+          # token: ${{ secrets.PIGEON_REPO_TOKEN }}   # if the repo is private
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;26.3.11579264"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pigeon-mobile/core
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: assembleDebug
+        working-directory: pigeon-mobile/android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: ./gradlew assembleDebug --stacktrace
