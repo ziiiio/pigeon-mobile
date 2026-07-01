@@ -15,6 +15,10 @@ use std::sync::RwLock;
 
 use pigeon_crypto::Device;
 
+/// The Client–Server API HTTP client (M1.1). Internal for now — its typed
+/// results surface over the FFI when M1.2 adds `register`/`login`.
+pub mod api;
+
 /// Errors surfaced across the FFI boundary.
 ///
 /// M0 carries a single placeholder variant; the real typed error set (mapping

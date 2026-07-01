@@ -46,7 +46,7 @@ The whole project's risk is concentrated here: proving the Rust-core-via-UniFFI 
 
 First real protocol surface. Keeps crypto out of scope — just HTTP + token lifecycle.
 
-- [ ] **M1.1 — HTTP client in the core.** `api.rs` (reqwest+rustls): base-URL/homeserver config, token injection, `P_`-error mapping to typed core errors. Server discovery (`.well-known/pigeon/server`) — decide if in-scope now or M-later; document.
+- [x] **M1.1 — HTTP client in the core.** ✅ `api.rs` (reqwest + rustls, versions/features mirroring the server): an `Api` client with homeserver base-URL config, bearer-token injection (`set_token`), and generic `get`/`post`/`put` verb helpers. `P_`-error bodies map to a typed `ApiError`/`ErrorCode` (all 12 documented codes + `Other` for forward-compat on a server version bump); matches the stable `errcode`, never the human text. Host-side unit tests cover the error mapping + URL normalization (no network). **Server discovery deferred:** `.well-known/pigeon/server` is out of scope — the caller passes a full base URL; revisit when a "pick your homeserver" UI needs it. *(Named endpoints + FFI exposure land in M1.2.)*
 - [ ] **M1.2 — register / login.** Core functions (`register`, `login`) calling `/_pigeon/client/v1/...` exactly as the reference CLI does. Returns a session (token + device_id + server).
 - [ ] **M1.3 — session persistence.** Store the token + device_id in the **platform keystore** (referenced from the core), not the app DB in clear. Restore session on launch.
 - [ ] **M1.4 — auth UI.** Compose screens: pick homeserver, register, login, logout. Loading/error states for every `P_` error variant.
