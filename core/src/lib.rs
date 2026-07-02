@@ -15,22 +15,50 @@ use std::sync::RwLock;
 
 use pigeon_crypto::Device;
 
-/// The Client–Server API HTTP client (M1.1). Internal for now — its typed
-/// results surface over the FFI when M1.2 adds `register`/`login`.
+/// The Client–Server API HTTP client (M1.1).
 pub mod api;
+/// Session lifecycle — register/login and the logged-in client object (M1.2).
+pub mod session;
+
+use api::{ApiError, ErrorCode};
 
 /// Errors surfaced across the FFI boundary.
 ///
 /// M0 carries a single placeholder variant; the real typed error set (mapping
 /// the server's `P_*` codes and crypto/IO failures) grows from M1 onward.
+// NB: error-variant fields are named `reason`, not `message` — UniFFI maps an
+// error variant to a Kotlin `Throwable` subclass, and a field named `message`
+// collides with `Throwable.message` (generates uncompilable bindings). Keep
+// error fields off that reserved name.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
-    // NB: the field is `reason`, not `message` — UniFFI maps an error variant to
-    // a Kotlin `Throwable` subclass, and a field named `message` collides with
-    // `Throwable.message` (generates uncompilable bindings). Keep error fields
-    // off that reserved name.
     #[error("crypto error: {reason}")]
     Crypto { reason: String },
+    /// The server rejected the request with a typed `P_*` code — the UI branches
+    /// on `code` (e.g. `UserInUse` → "username taken").
+    #[error("server rejected the request [{code}]: {reason}")]
+    Api { code: ErrorCode, reason: String },
+    /// Transport failure (offline, DNS/TLS, timeout). Offline-first: retryable.
+    #[error("network error: {reason}")]
+    Network { reason: String },
+    /// The server's response wasn't the shape the protocol promised.
+    #[error("protocol error: {reason}")]
+    Protocol { reason: String },
+}
+
+/// Map the HTTP layer's typed failure onto the FFI-visible error. The `P_*` code
+/// is preserved (never string-matched) so the UI can branch on it.
+impl From<ApiError> for CoreError {
+    fn from(err: ApiError) -> Self {
+        match err {
+            ApiError::Server { code, message, .. } => CoreError::Api {
+                code,
+                reason: message,
+            },
+            ApiError::Network { reason } => CoreError::Network { reason },
+            ApiError::Malformed { reason } => CoreError::Protocol { reason },
+        }
+    }
 }
 
 // --- Logging (M0.7) ----------------------------------------------------------

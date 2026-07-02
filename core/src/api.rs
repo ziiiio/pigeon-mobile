@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use reqwest::{Client, Method, RequestBuilder};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// A typed Pigeon error code — the server's `P_*` set
 /// (`../../pigeon/crates/client-api/src/error.rs`).
@@ -28,7 +28,11 @@ use serde_json::Value;
 /// `Other` keeps the client forward-compatible: the wire contract may add codes
 /// on a server version bump, and an unknown code must degrade gracefully rather
 /// than panic — it carries the raw string so the UI can still show *something*.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Exposed over the FFI (`uniffi::Enum`) so the native UI can branch on the code
+/// (e.g. show a "username taken" message for `UserInUse`) — the typed-error rule
+/// (CLAUDE.md).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ErrorCode {
     Forbidden,
     UnknownToken,
@@ -42,8 +46,11 @@ pub enum ErrorCode {
     UserInUse,
     InvalidUsername,
     Unknown,
-    /// A code this client build doesn't recognise (newer server).
-    Other(String),
+    /// A code this client build doesn't recognise (newer server). Named field so
+    /// it survives the `uniffi::Enum` mapping (tuple variants are avoided).
+    Other {
+        code: String,
+    },
 }
 
 impl ErrorCode {
@@ -62,7 +69,9 @@ impl ErrorCode {
             "P_USER_IN_USE" => Self::UserInUse,
             "P_INVALID_USERNAME" => Self::InvalidUsername,
             "P_UNKNOWN" => Self::Unknown,
-            other => Self::Other(other.to_owned()),
+            other => Self::Other {
+                code: other.to_owned(),
+            },
         }
     }
 
@@ -81,7 +90,7 @@ impl ErrorCode {
             Self::UserInUse => "P_USER_IN_USE",
             Self::InvalidUsername => "P_INVALID_USERNAME",
             Self::Unknown => "P_UNKNOWN",
-            Self::Other(s) => s,
+            Self::Other { code } => code,
         }
     }
 }
@@ -111,6 +120,17 @@ pub enum ApiError {
     /// A response whose body wasn't the JSON shape we expected.
     #[error("malformed response: {reason}")]
     Malformed { reason: String },
+}
+
+/// The server's response to `register`/`login` — the raw `AuthResponse`
+/// (`../../pigeon/crates/client-api/src/handlers/auth.rs`). Holds the
+/// `access_token`, so it stays *inside* the core (Gotcha #1) — `session.rs`
+/// keeps the token and hands the UI only the non-secret identity.
+#[derive(Debug, Clone)]
+pub struct AuthResponse {
+    pub user_id: String,
+    pub device_id: String,
+    pub access_token: String,
 }
 
 /// The Client–Server API client: one per session, reused across requests
@@ -171,6 +191,46 @@ impl Api {
         b
     }
 
+    // --- Named endpoints (M1.2) ---------------------------------------------
+    // Thin wrappers over the verb helpers, mirroring the reference CLI's call
+    // sequence exactly (../../pigeon/clients/cli/src/api.rs).
+
+    /// `POST /register` → a new account + first session.
+    pub async fn register(&self, username: &str, password: &str) -> Result<AuthResponse, ApiError> {
+        let body = self
+            .post(
+                "/_pigeon/client/v1/register",
+                &json!({ "username": username, "password": password }),
+            )
+            .await?;
+        parse_auth(&body)
+    }
+
+    /// `POST /login` (password flow) → a session for an existing account.
+    /// `user` may be a bare localpart or a full `@user:server` id.
+    pub async fn login(&self, user: &str, password: &str) -> Result<AuthResponse, ApiError> {
+        let body = self
+            .post(
+                "/_pigeon/client/v1/login",
+                &json!({ "type": "p.login.password", "user": user, "password": password }),
+            )
+            .await?;
+        parse_auth(&body)
+    }
+
+    /// `POST /logout` → revoke the current bearer token server-side. (The FFI
+    /// logout surface is M1.5; this is just the HTTP primitive.)
+    pub async fn logout(&self) -> Result<(), ApiError> {
+        self.post("/_pigeon/client/v1/logout", &json!({})).await?;
+        Ok(())
+    }
+
+    /// `GET /account/whoami` → `{ user_id, device_id }`. Used to validate a
+    /// restored token on launch (M1.3).
+    pub async fn whoami(&self) -> Result<Value, ApiError> {
+        self.get("/_pigeon/client/v1/account/whoami").await
+    }
+
     /// Send a built request: parse JSON on 2xx, else map the `P_*` error body.
     async fn send(&self, req: RequestBuilder) -> Result<Value, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network {
@@ -219,6 +279,25 @@ fn parse_error(status: u16, body: &Value) -> ApiError {
     }
 }
 
+/// Extract the three `AuthResponse` fields from a `register`/`login` 2xx body.
+/// Pure — unit-tested without a server. A missing field is a protocol mismatch
+/// (`Malformed`), not a server error.
+fn parse_auth(body: &Value) -> Result<AuthResponse, ApiError> {
+    let field = |key: &str| -> Result<String, ApiError> {
+        body[key]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| ApiError::Malformed {
+                reason: format!("auth response missing string field `{key}`"),
+            })
+    };
+    Ok(AuthResponse {
+        user_id: field("user_id")?,
+        device_id: field("device_id")?,
+        access_token: field("access_token")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,7 +328,12 @@ mod tests {
     fn unknown_error_code_is_preserved_verbatim() {
         // A code from a newer server must not panic or be swallowed.
         let code = ErrorCode::from_wire("P_SOME_FUTURE_CODE");
-        assert_eq!(code, ErrorCode::Other("P_SOME_FUTURE_CODE".to_owned()));
+        assert_eq!(
+            code,
+            ErrorCode::Other {
+                code: "P_SOME_FUTURE_CODE".to_owned()
+            }
+        );
         assert_eq!(code.as_str(), "P_SOME_FUTURE_CODE");
     }
 
@@ -284,6 +368,29 @@ mod tests {
                 assert_eq!(message, "(no error message)");
             }
             other => panic!("expected Server error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_auth_reads_all_three_fields() {
+        let body = json!({
+            "user_id": "@alice:pigeon.example",
+            "device_id": "ABCD1234",
+            "access_token": "secret-token"
+        });
+        let auth = parse_auth(&body).expect("valid auth body");
+        assert_eq!(auth.user_id, "@alice:pigeon.example");
+        assert_eq!(auth.device_id, "ABCD1234");
+        assert_eq!(auth.access_token, "secret-token");
+    }
+
+    #[test]
+    fn parse_auth_rejects_missing_field() {
+        // No access_token → a protocol mismatch, surfaced as Malformed.
+        let body = json!({ "user_id": "@a:x", "device_id": "D1" });
+        match parse_auth(&body) {
+            Err(ApiError::Malformed { reason }) => assert!(reason.contains("access_token")),
+            other => panic!("expected Malformed, got {other:?}"),
         }
     }
 

@@ -2,7 +2,7 @@
 
 The structural map of the Pigeon mobile client: *what parts exist, where, and how they fit*. For the rules and conventions see [`../CLAUDE.md`](../CLAUDE.md); for the plan see [`../ROADMAP.md`](../ROADMAP.md). For the **protocol and the reused crates**, the authority is the homeserver repo ([`../../pigeon`](../../pigeon)).
 
-> Status note: this describes the **target** architecture. The project is at the end of Phase M0 (foundations). **Built so far:** the `core/` crate and its UniFFI surface (`core_version`, `self_test_crypto`, `CoreError`, plus the `LogSink`/`set_log_sink`/`emit_test_log` log callback); cargo-ndk cross-compile to `arm64-v8a` + `x86_64` `.so`s; the Hello-core Jetpack Compose app driving the core through the generated Kotlin; Gradle build glue that makes `./gradlew assembleDebug` rebuild core + regen bindings + package the `.so` in one command; a two-lane GitHub Actions CI; and a Docker dev container. **The whole Rust→cargo-ndk→UniFFI→Kotlin→APK pipeline round-trips in the build** (M0.1–M0.7), verified by `cargo test`/`clippy`/`fmt` + `assembleDebug` in the containers; the only unticked M0 item is a visual run on an emulator. **Phase M1 has begun:** `api.rs` (M1.1) exists — the reqwest+rustls Client–Server HTTP client with base-URL/token config, `get`/`post`/`put` helpers, and `P_`-error → typed `ApiError`/`ErrorCode` mapping (host-tested). The rest of M1 (session/register/login + FFI) and everything past it (sync, rooms, e2ee, media, iOS) is not built yet. Keep this doc in sync as code lands (CLAUDE.md doc-sync rule).
+> Status note: this describes the **target** architecture. The project is at the end of Phase M0 (foundations). **Built so far:** the `core/` crate and its UniFFI surface (`core_version`, `self_test_crypto`, `CoreError`, plus the `LogSink`/`set_log_sink`/`emit_test_log` log callback); cargo-ndk cross-compile to `arm64-v8a` + `x86_64` `.so`s; the Hello-core Jetpack Compose app driving the core through the generated Kotlin; Gradle build glue that makes `./gradlew assembleDebug` rebuild core + regen bindings + package the `.so` in one command; a two-lane GitHub Actions CI; and a Docker dev container. **The whole Rust→cargo-ndk→UniFFI→Kotlin→APK pipeline round-trips in the build** (M0.1–M0.7), verified by `cargo test`/`clippy`/`fmt` + `assembleDebug` in the containers; the only unticked M0 item is a visual run on an emulator. **Phase M1 is underway (M1.1–M1.2 built):** `api.rs` is the reqwest+rustls Client–Server HTTP client (base-URL/token config, `get`/`post`/`put`, `P_`-error → typed `ApiError`/`ErrorCode`); `session.rs` adds the async FFI `register`/`login` returning a `PigeonClient` object that holds the token in-core and exposes only the `Session` identity — the first async FFI surface (UniFFI tokio runtime → Kotlin `suspend` fns), with `CoreError` mapping `ApiError` across the boundary. The rest of M1 (token persistence M1.3, auth UI M1.4, logout M1.5) and everything past it (sync, rooms, e2ee, media, iOS) is not built yet. Keep this doc in sync as code lands (CLAUDE.md doc-sync rule).
 
 ## 1. The one big idea
 
@@ -112,11 +112,12 @@ Depend on these by path (monorepo-adjacent) or pinned git rev — decided and do
 Keep it small, coarse, and stable. Sketch:
 
 ```
-// session
-fn register(server: String, username: String, password: String) -> Session
-fn login(server: String, username: String, password: String) -> Session
-fn restore_session() -> Session?            // from keystore on launch
-fn logout()
+// session  — register/login IMPLEMENTED (M1.2); rest is later-phase sketch
+async fn register(server, username, password) -> PigeonClient   // token stays in-core
+async fn login(server, user, password) -> PigeonClient          // ↑ Gotcha #1
+//   PigeonClient.session() -> Session { user_id, device_id, server }   // no token
+fn restore_session() -> PigeonClient?       // from keystore on launch (M1.3)
+async fn logout()                           // (M1.5)
 
 // sync (async; emits diffs to the observer)
 fn start_sync(observer: SyncObserver)        // long-poll loop, cancelable
