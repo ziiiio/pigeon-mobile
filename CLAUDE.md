@@ -88,8 +88,8 @@ docs/
 
 Update this section as the project progresses. Claude should refuse to add Phase N+1 features when working in Phase N unless explicitly asked.
 
-**Active phase: Phase M1 (identity: register/login/session).** M0 is complete bar a one-time visual emulator run (see below). **M1 progress:** M1.1 + M1.2 have landed.
-- **M1.1** (`core/src/api.rs`): reqwest+rustls `Api` with base-URL/token config, `get`/`post`/`put` helpers, `P_`-error → typed `ApiError`/`ErrorCode` (12 codes + `Other`). Server discovery (`.well-known`) deferred.
+**Active phase: Phase M1 (identity: register/login/session).** **M0 is complete** — the Hello-core app was run on an arm64 emulator and renders Rust-computed values (`core_version()` + `self_test_crypto()`) with the M0.7 log sink reaching logcat; the full Rust→cargo-ndk→UniFFI→Kotlin→Compose pipeline round-trips on a real device. **M1 progress:** M1.1 + M1.2 have landed.
+- **M1.1** (`core/src/api.rs`): reqwest+rustls `Api` with base-URL/token config, `get`/`post`/`put` helpers, `P_`-error → typed `ApiError`/`ErrorCode` (12 codes + `Other`). Server discovery: none exists in Pigeon's client contract (see Protocol note below).
 - **M1.2** (`core/src/session.rs`): async FFI `register`/`login` → an opaque `PigeonClient` object holding the token *in-core* (Gotcha #1); the UI gets only the `Session` record (no token). `CoreError` expanded (`Api{code}`/`Network`/`Protocol`) with `From<ApiError>`. First async FFI (UniFFI **tokio** runtime → Kotlin `suspend` fns); the generated bindings compile via `assembleDebug`.
 
 **Validation:** register/login are covered by mock-HTTP tests (`wiremock` dev-dep, no Docker) exercising request shapes, bearer injection, `P_`-error → typed code, and the full FFI path. The real oneshot-homeserver e2e (the M1 exit gate) needs Docker — the server test harness spins Postgres via testcontainers, absent from the dev container — so it's parked for a **separate Docker-gated CI lane** (placement TBD; don't add it to the default `cargo test`).
