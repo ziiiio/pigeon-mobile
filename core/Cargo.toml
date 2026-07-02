@@ -26,7 +26,8 @@ uniffi = { version = "0.28", features = ["cli", "tokio"] }
 thiserror = "1"
 # The async runtime behind the FFI's async functions. `rt-multi-thread` gives
 # UniFFI a runtime to spawn on; reqwest pulls the I/O features it needs.
-tokio = { version = "1", features = ["rt-multi-thread"] }
+# `macros` powers `#[tokio::test]` in the HTTP mock tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # Client–Server API HTTP client (M1.1). Versions/features mirror the homeserver's
 # client stack (../../pigeon/Cargo.toml) so the two agree on TLS + JSON behaviour:
@@ -42,3 +43,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Path deps into the sibling `pigeon` repo (see ../docs/ARCHITECTURE.md §4.1).
 pigeon-core = { path = "../../pigeon/crates/core" }
 pigeon-crypto = { path = "../../pigeon/crates/crypto" }
+
+[dev-dependencies]
+# In-process mock homeserver for HTTP-level tests of the api/session layer:
+# asserts the request shape (method/path/body/bearer) and drives the P_-error
+# mapping without a real server or Docker. The full oneshot-homeserver e2e
+# (testcontainers) is a heavier, Docker-gated lane tracked separately.
+wiremock = "0.6"
