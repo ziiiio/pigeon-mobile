@@ -21,6 +21,18 @@ This is the project's reason for existing. Before writing *any* logic on the nat
 
 The native side is allowed to own: **UI, navigation, OS integration** (notifications/FCM, photo picker, sharing, biometric prompts, foreground services), and **a thin view-model layer** that calls the core and renders what it returns. If you find yourself parsing a Pigeon event, doing crypto, or constructing a federation/client API request body in Kotlin or Swift, **stop** — that logic belongs in `pigeon-mobile-core`.
 
+## The Completeness Rule: no deferred work — if it can be done now, do it now
+
+**Do not defer work you could finish now.** If a piece of a feature is implementable with what already exists — the dependency is present, the wire contract is known, the foundation it needs is built — implement it, completely, in the same change. Do not split doable work into a "later" bucket, leave it as a bare `TODO`, or label it "deferred"/"M-later" to shrink a diff. A stage is done when its endpoints, its error paths, and its tests are all in — not when the happy path compiles.
+
+**This does not contradict the phase guard — the two cover different things, and the distinction is *blocked* vs *deferred*:**
+- **Blocked** = the work genuinely can't be built yet because its foundation doesn't exist (the sync loop before the store; e2ee before sync; anything needing a not-yet-built module or a later milestone's groundwork). Blocked work *waits* — that's real sequencing, and the phase guard ("don't pull work forward") governs it. A stub/interface for blocked work is fine.
+- **Deferred** = postponing work you *could* finish now, for convenience. This is what the rule forbids. If it's buildable today, "we'll wire it up in a later stage" is not an acceptable reason to skip it.
+
+Litmus test: if you're about to write "deferred", "TODO later", "M-later", or "left for a follow-up" for something whose dependencies already exist — stop and build it now. The current phase still scopes *which features* you pursue; within that scope (and for anything a stage already touches), finish it.
+
+**The one legitimate deferral** is an explicit decision that is genuinely the user's to make — a new dependency needing approval, a real design fork, or work that would pull a *later phase's* feature forward. Flag it, name the trade-off, and get a decision. Never silently defer.
+
 ## Architecture at a Glance
 
 ```
@@ -170,6 +182,7 @@ Stick to these unless you have a specific reason and have discussed it.
 - When touching crypto or signatures, write a negative test in the same change.
 - For new core API surface, keep the FFI type small and stable; regenerate and smoke-test bindings on Android before considering it done.
 - Keep the network off the UI thread and out of the way of reads — offline-first.
+- Finish what's doable now — complete a stage's endpoints, error paths, and tests in the same change; don't defer buildable work (see "The Completeness Rule").
 - Keep the docs in sync **in the same commit as the code** (see below).
 
 ## What Claude Should Not Do
@@ -178,7 +191,8 @@ Stick to these unless you have a specific reason and have discussed it.
 - Don't add dependencies (especially crypto, networking, analytics/crash, DB) without flagging them for approval.
 - Don't add `unsafe` in the core; don't write new crypto primitives.
 - Don't log/transmit plaintext, tokens, or keys.
-- Don't add Phase N+1 features while in Phase N. Stub interfaces are fine; implementations are not.
+- Don't add Phase N+1 features while in Phase N. A stub/interface for genuinely *blocked* later-phase work is fine; its implementation is not. (This is not licence to defer work you *could* finish now — see "The Completeness Rule".)
+- Don't defer doable work. If a stage already touches it and its dependencies exist, finish it now — don't leave a `TODO`/"later" behind. (The Completeness Rule.)
 - Don't diverge from the server's wire contract to "make this screen easier."
 
 ## Documentation Sync Rule
