@@ -44,6 +44,10 @@ pub enum CoreError {
     /// The server's response wasn't the shape the protocol promised.
     #[error("protocol error: {reason}")]
     Protocol { reason: String },
+    /// The platform keystore failed (persist/restore of the session). Mapped
+    /// from `session::KeyStoreError`. (M1.3.)
+    #[error("storage error: {reason}")]
+    Storage { reason: String },
 }
 
 /// Map the HTTP layer's typed failure onto the FFI-visible error. The `P_*` code
@@ -93,8 +97,9 @@ pub fn set_log_sink(sink: Box<dyn LogSink>) {
 }
 
 /// Emit a record to the installed sink, if any. Internal helper — the real API
-/// will route `tracing` here in M1+; for now it backs `emit_test_log`.
-fn emit(level: LogLevel, target: &str, message: &str) {
+/// will route `tracing` here in M1+; for now it backs `emit_test_log` and the
+/// session layer's diagnostics. Never pass secrets/plaintext (Gotcha #2).
+pub(crate) fn emit(level: LogLevel, target: &str, message: &str) {
     if let Some(sink) = LOG_SINK.read().expect("log sink lock poisoned").as_ref() {
         sink.log(level, target.to_string(), message.to_string());
     }

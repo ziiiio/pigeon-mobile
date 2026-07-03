@@ -50,3 +50,6 @@ pigeon-crypto = { path = "../../pigeon/crates/crypto" }
 # mapping without a real server or Docker. The full oneshot-homeserver e2e
 # (testcontainers) is a heavier, Docker-gated lane tracked separately.
 wiremock = "0.6"
+# Serialises tests that touch the process-global key store, so they don't race
+# under cargo's parallel test runner.
+serial_test = "3"

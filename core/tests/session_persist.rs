@@ -1,0 +1,182 @@
+//! Keystore persistence + restore tests (M1.3), against a mock homeserver and a
+//! mock key store. They drive the real FFI surface — `set_key_store`, `login`,
+//! `restore_session` — and cover the offline-first restore decisions.
+//!
+//! These share the process-global key store, so they're `#[serial]`.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use pigeon_mobile_core::session::{login, restore_session, set_key_store, KeyStore, KeyStoreError};
+use serde_json::json;
+use serial_test::serial;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// An in-memory `KeyStore` whose backing map the test retains a handle to, so it
+/// can assert what the core persisted/deleted.
+#[derive(Clone, Default)]
+struct MockKeyStore {
+    map: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+impl KeyStore for MockKeyStore {
+    fn put(&self, key: String, value: Vec<u8>) -> Result<(), KeyStoreError> {
+        self.map.lock().unwrap().insert(key, value);
+        Ok(())
+    }
+    fn get(&self, key: String) -> Result<Option<Vec<u8>>, KeyStoreError> {
+        Ok(self.map.lock().unwrap().get(&key).cloned())
+    }
+    fn delete(&self, key: String) -> Result<(), KeyStoreError> {
+        self.map.lock().unwrap().remove(&key);
+        Ok(())
+    }
+}
+
+impl MockKeyStore {
+    /// Install a fresh mock key store and keep a handle to inspect it.
+    fn install() -> Self {
+        let store = MockKeyStore::default();
+        set_key_store(Box::new(store.clone()));
+        store
+    }
+    fn entry_count(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+    /// The single stored blob, decoded as JSON (panics unless exactly one entry).
+    fn only_blob(&self) -> serde_json::Value {
+        let map = self.map.lock().unwrap();
+        assert_eq!(map.len(), 1, "expected exactly one stored entry");
+        let bytes = map.values().next().unwrap();
+        serde_json::from_slice(bytes).expect("stored blob is JSON")
+    }
+}
+
+fn auth_body() -> serde_json::Value {
+    json!({
+        "user_id": "@alice:test.example",
+        "device_id": "DEVICE1",
+        "access_token": "secret-token"
+    })
+}
+
+async fn mount_login(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(auth_body()))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn login_persists_session_blob() {
+    let store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+
+    login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+
+    // The identity AND the token were persisted (the whole blob is keystore-
+    // protected at rest — Gotcha #1).
+    let blob = store.only_blob();
+    assert_eq!(blob["user_id"], "@alice:test.example");
+    assert_eq!(blob["device_id"], "DEVICE1");
+    assert_eq!(blob["server"], server.uri());
+    assert_eq!(blob["access_token"], "secret-token");
+}
+
+#[tokio::test]
+#[serial]
+async fn restore_validates_token_and_returns_session() {
+    let _store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/_pigeon/client/v1/account/whoami"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "user_id": "@alice:test.example", "device_id": "DEVICE1" })),
+        )
+        .mount(&server)
+        .await;
+
+    login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+
+    let restored = restore_session().await.expect("restore ok");
+    let client = restored.expect("a session was restored");
+    assert_eq!(client.session().user_id, "@alice:test.example");
+    assert_eq!(client.session().server, server.uri());
+}
+
+#[tokio::test]
+#[serial]
+async fn restore_clears_revoked_token() {
+    let store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    // The stored token is no longer recognised by the server.
+    Mock::given(method("GET"))
+        .and(path("/_pigeon/client/v1/account/whoami"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(
+            json!({ "errcode": "P_UNKNOWN_TOKEN", "error": "access token is not recognised" }),
+        ))
+        .mount(&server)
+        .await;
+
+    login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+    assert_eq!(store.entry_count(), 1, "login persisted a session");
+
+    let restored = restore_session().await.expect("restore ok");
+    assert!(restored.is_none(), "a revoked token yields no session");
+    assert_eq!(store.entry_count(), 0, "the dead session was cleared");
+}
+
+#[tokio::test]
+#[serial]
+async fn restore_is_optimistic_when_offline() {
+    let store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+
+    login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+
+    // Repoint the persisted session at a dead port so restore's whoami fails at
+    // the transport layer — the offline-first path. (Dropping the mock server
+    // isn't synchronous, so it can't be relied on to refuse connections.)
+    {
+        let mut map = store.map.lock().unwrap();
+        let key = map.keys().next().unwrap().clone();
+        let mut blob: serde_json::Value = serde_json::from_slice(&map[&key]).unwrap();
+        blob["server"] = json!("http://127.0.0.1:1");
+        map.insert(key, blob.to_string().into_bytes());
+    }
+
+    let restored = restore_session().await.expect("restore ok");
+    assert!(
+        restored.is_some(),
+        "offline restore keeps the session rather than logging out"
+    );
+    assert_eq!(
+        store.entry_count(),
+        1,
+        "the session was NOT cleared while offline"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn restore_with_no_stored_session_is_none() {
+    let _store = MockKeyStore::install(); // fresh + empty
+    let restored = restore_session().await.expect("restore ok");
+    assert!(restored.is_none());
+}
