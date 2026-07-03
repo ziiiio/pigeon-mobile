@@ -41,3 +41,5 @@ xcuserdata/
 # Secrets / local config
 *.env
 .env.local
+# e2e (host/Docker-gated lane)
+e2e/target/

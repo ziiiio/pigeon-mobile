@@ -193,6 +193,7 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI UI +
 - **Android cross-compile:** `cargo-ndk` (NDK version + Rust targets + min SDK documented in M0). One Gradle task rebuilds the core, runs codegen, and bundles the `.so`s so `assembleDebug` is a single command.
 - **iOS cross-compile:** `cargo` for `aarch64-apple-ios` (+ simulator), packaged into an `xcframework`.
 - **CI lanes:** **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`), **android** (codegen + `assembleDebug` + lint), and later **ios** (xcframework + build). Aggressive caching.
+- **End-to-end lane (`e2e/`):** a **separate crate** (not part of `core/`) that path-deps on `core` + the server's `tests-integration` harness. It boots the real `pigeon` server in-process over a TCP socket (real Postgres via **testcontainers**) and drives the core's FFI against it — the real-wire-contract proof the mock tests can't give. **Requires Docker**, so it is deliberately excluded from `core/`'s build and the core CI lane (the dev container has no Docker socket). Run on a host/CI with Docker: `cd e2e && cargo test`. First proof: the M1 register/login/restore flows (M1.2/M1.3).
 
 ## 8. End-to-end flows (how the pieces cooperate)
 

@@ -1,0 +1,30 @@
+# pigeon-mobile-e2e — the Docker-gated oneshot-homeserver end-to-end lane.
+#
+# Deliberately a SEPARATE crate, not part of `core/`: it dev-depends on the
+# server's `tests-integration` harness (which spins a real Postgres via
+# testcontainers), so it needs Docker at runtime. Keeping it out of `core/`
+# means the container's fast `cargo test` and the core CI lane never build or
+# run this heavy, Docker-dependent code.
+#
+# Run it on a host with Docker:  (from this dir)  cargo test
+# It is NOT built by the dev container's core workflow.
+[package]
+name = "pigeon-mobile-e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The crate under test + its typed errors.
+pigeon-mobile-core = { path = "../core" }
+# The homeserver's in-process test harness (real Postgres via testcontainers).
+tests-integration = { path = "../../pigeon/tests/integration" }
+# To bind the harness's axum Router to a real TCP port for reqwest to hit.
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde_json = "1"
+
+[[test]]
+name = "oneshot"
+path = "tests/oneshot.rs"
