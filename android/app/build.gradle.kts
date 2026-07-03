@@ -88,4 +88,16 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+
+    // M1.4 auth UI: ViewModel + coroutines to bridge the core's async FFI, and
+    // EncryptedSharedPreferences (Android Keystore-backed) for the KeyStore impl.
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // NB (flagged dep): androidx.security-crypto wraps the Android Keystore; it is
+    // the sanctioned way to store secret bytes at rest — it does not roll its own
+    // crypto. Alpha is the current line for this artifact.
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    testImplementation("junit:junit:4.13.2")
 }

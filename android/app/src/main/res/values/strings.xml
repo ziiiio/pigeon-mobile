@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Pigeon</string>
+
+    <!-- Auth (M1.4) -->
+    <string name="auth_title">Sign in to Pigeon</string>
+    <string name="auth_homeserver">Homeserver URL</string>
+    <string name="auth_username">Username</string>
+    <string name="auth_password">Password</string>
+    <string name="auth_login">Log in</string>
+    <string name="auth_register">Register</string>
+    <string name="home_signed_in_as">Signed in as</string>
+    <string name="home_device">Device</string>
+    <string name="home_server">Homeserver</string>
 </resources>
