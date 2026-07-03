@@ -17,6 +17,13 @@
 # The whole projects/ directory is mounted so the core's path-dependencies on
 # ../pigeon resolve exactly as on the host. Cargo registry / target dirs and the
 # Gradle cache live in named volumes so they persist and avoid slow bind I/O.
+#
+# Host path is portable: it defaults to `..` (this repo's parent, i.e. projects/),
+# which is correct on any machine as long as the sibling layout is preserved:
+#   <anywhere>/projects/pigeon-mobile  (this repo)
+#   <anywhere>/projects/pigeon         (the homeserver, for the ../pigeon path-deps)
+# Override with the PROJECTS_DIR env var (or a .env file) if your layout differs,
+# e.g.  PROJECTS_DIR=/home/me/code docker compose up -d dev
 services:
   dev:
     build:
@@ -26,7 +33,7 @@ services:
     container_name: pigeon-mobile-dev
     working_dir: /workspace/pigeon-mobile
     volumes:
-      - /Users/hegel/Documents/projects:/workspace
+      - ${PROJECTS_DIR:-..}:/workspace
       - cargo-registry:/usr/local/cargo/registry
       - core-target:/workspace/pigeon-mobile/core/target
       - gradle-cache:/root/.gradle
@@ -41,7 +48,7 @@ services:
     container_name: pigeon-mobile-android
     working_dir: /workspace/pigeon-mobile
     volumes:
-      - /Users/hegel/Documents/projects:/workspace
+      - ${PROJECTS_DIR:-..}:/workspace
       - cargo-registry:/usr/local/cargo/registry
       # Separate target volume: amd64 artifacts must not mix with the arm64 dev's.
       - core-target-amd64:/workspace/pigeon-mobile/core/target
