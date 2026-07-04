@@ -9,8 +9,20 @@
     <string name="auth_password">Password</string>
     <string name="auth_login">Log in</string>
     <string name="auth_register">Register</string>
-    <string name="home_signed_in_as">Signed in as</string>
-    <string name="home_device">Device</string>
-    <string name="home_server">Homeserver</string>
     <string name="home_sign_out">Sign out</string>
+
+    <!-- Rooms (M2.3) -->
+    <string name="rooms_title">Rooms</string>
+    <string name="rooms_offline">Offline</string>
+    <string name="rooms_encrypted">Encrypted</string>
+    <string name="rooms_empty">No rooms yet</string>
+    <string name="rooms_empty_hint">Create a room or join one to get started.</string>
+    <string name="rooms_join">Join</string>
+    <string name="rooms_cancel">Cancel</string>
+    <string name="rooms_create_title">Create room</string>
+    <string name="rooms_create_name">Name (optional)</string>
+    <string name="rooms_create_topic">Topic (optional)</string>
+    <string name="rooms_create_confirm">Create</string>
+    <string name="rooms_join_title">Join a room</string>
+    <string name="rooms_join_id">Room ID (!room:server)</string>
 </resources>

@@ -259,6 +259,83 @@ async fn run_sync_applies_a_batch_and_notifies_then_cancels() {
     assert_eq!(*rec.last_connected.lock().unwrap(), Some(true));
 }
 
+// --- Rooms: create / join (M2.3) ------------------------------------------
+
+/// Log in against `server` and return the client (in-memory store in tests).
+async fn logged_in(
+    server: &MockServer,
+) -> std::sync::Arc<pigeon_mobile_core::session::PigeonClient> {
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(auth_body()))
+        .mount(server)
+        .await;
+    session::login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok")
+}
+
+#[tokio::test]
+async fn create_room_posts_name_topic_and_returns_id() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .and(body_json(json!({ "name": "General", "topic": "chatter" })))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!new:test.example" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client
+        .create_room(Some("General".into()), Some("chatter".into()))
+        .await
+        .expect("create ok");
+    assert_eq!(id, "!new:test.example");
+}
+
+#[tokio::test]
+async fn create_room_omits_unset_fields() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    // No name/topic → an empty body (plaintext M2: no `encryption` either).
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .and(body_json(json!({})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!x:test.example" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client.create_room(None, None).await.expect("create ok");
+    assert_eq!(id, "!x:test.example");
+}
+
+#[tokio::test]
+async fn join_room_posts_to_join_path() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/rooms/!r:test.example/join"))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!r:test.example" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .join_room("!r:test.example".into())
+        .await
+        .expect("join ok");
+}
+
 #[tokio::test]
 async fn ffi_login_network_failure_is_typed_network_error() {
     // Nothing is listening on this port → a transport failure, not an HTTP

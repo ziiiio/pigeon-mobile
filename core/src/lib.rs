@@ -17,6 +17,8 @@ use pigeon_crypto::Device;
 
 /// The Client–Server API HTTP client (M1.1).
 pub mod api;
+/// Rooms: list, create/join (M2.3), timeline (M2.4), send (M2.5).
+pub mod rooms;
 /// Session lifecycle — register/login and the logged-in client object (M1.2).
 pub mod session;
 /// Local SQLite persistence — rooms, timeline, membership, sync token (M2.1).

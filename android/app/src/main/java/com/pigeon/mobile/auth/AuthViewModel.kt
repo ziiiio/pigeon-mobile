@@ -25,13 +25,15 @@ sealed interface AuthState {
     data object Submitting : AuthState
 
     /**
-     * Signed in with this session identity. [signingOut] is true while a logout
-     * is in flight; [error] carries a logout failure that left the session
-     * intact (so the user can retry rather than see a signed-out UI over a live
-     * session).
+     * Signed in with this session identity. [client] is the opaque core handle
+     * the rooms/sync flows hang off (the token stays inside it — Gotcha #1).
+     * [signingOut] is true while a logout is in flight; [error] carries a logout
+     * failure that left the session intact (so the user can retry rather than see
+     * a signed-out UI over a live session).
      */
     data class SignedIn(
         val session: Session,
+        val client: PigeonClient,
         val signingOut: Boolean = false,
         val error: String? = null,
     ) : AuthState
@@ -58,7 +60,7 @@ class AuthViewModel : ViewModel() {
             _state.value = try {
                 coreRestoreSession()?.let { restored ->
                     client = restored
-                    AuthState.SignedIn(restored.session())
+                    AuthState.SignedIn(restored.session(), restored)
                 } ?: AuthState.SignedOut()
             } catch (e: CoreException) {
                 // A restore fault (e.g. storage) must not wedge launch — fall
@@ -104,7 +106,7 @@ class AuthViewModel : ViewModel() {
             _state.value = try {
                 val c = call()
                 client = c
-                AuthState.SignedIn(c.session())
+                AuthState.SignedIn(c.session(), c)
             } catch (e: CoreException) {
                 AuthState.SignedOut(authErrorMessage(e))
             }
