@@ -301,6 +301,19 @@ impl Api {
         json_string(&resp, "event_id")
     }
 
+    /// `GET /rooms/{room_id}/messages?limit=N` → `{ chunk: [event, …] }`, the
+    /// latest `limit` events (the server has no older-than cursor yet — M2 note).
+    pub async fn messages(&self, room_id: &str, limit: u32) -> Result<Value, ApiError> {
+        let limit = limit.to_string();
+        let req = self
+            .req(
+                Method::GET,
+                &format!("/_pigeon/client/v1/rooms/{room_id}/messages"),
+            )
+            .query(&[("limit", limit.as_str())]);
+        self.send(req).await
+    }
+
     /// `PUT /rooms/{room_id}/send/p.room.message/{txn_id}` → the event id.
     /// `content` is the raw message content (`{ body, msgtype }`). The server
     /// ignores `txn_id` (no server-side dedup — CLAUDE.md M2 note), so the client

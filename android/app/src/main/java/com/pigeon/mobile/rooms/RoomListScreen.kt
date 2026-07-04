@@ -20,6 +20,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.foundation.clickable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +38,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.pigeon.mobile.R
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import uniffi.pigeon_mobile_core.CoreException
 import uniffi.pigeon_mobile_core.PigeonClient
 import uniffi.pigeon_mobile_core.Room
@@ -67,9 +70,16 @@ fun RoomListRoute(
     )
     val state by vm.state.collectAsStateWithLifecycle()
 
+    // A monotonic "the store changed" signal the open chat also observes, so a
+    // room's timeline refreshes on the same sync events that refresh the list.
+    val changes = remember { MutableStateFlow(0L) }
+
     LaunchedEffect(client) {
         val observer = object : SyncObserver {
-            override fun onChange() = vm.reload()
+            override fun onChange() {
+                vm.reload()
+                changes.update { it + 1 }
+            }
             override fun onStatus(connected: Boolean) = vm.setConnected(connected)
         }
         try {
@@ -81,15 +91,31 @@ fun RoomListRoute(
         }
     }
 
-    RoomListScreen(
-        session = session,
-        state = state,
-        signingOut = signingOut,
-        signOutError = signOutError,
-        onCreateRoom = vm::createRoom,
-        onJoinRoom = vm::joinRoom,
-        onSignOut = onSignOut,
-    )
+    // Simple state-based navigation: a selected room shows its chat over the list.
+    // Plain `remember` — the selection resets on rotation (acceptable for M2).
+    var openRoom by remember { mutableStateOf<Room?>(null) }
+    val current = openRoom
+    if (current != null) {
+        ChatRoute(
+            client = client,
+            roomId = current.roomId,
+            roomTitle = current.name ?: current.roomId,
+            myUserId = session.userId,
+            changes = changes,
+            onBack = { openRoom = null },
+        )
+    } else {
+        RoomListScreen(
+            session = session,
+            state = state,
+            signingOut = signingOut,
+            signOutError = signOutError,
+            onOpenRoom = { openRoom = it },
+            onCreateRoom = vm::createRoom,
+            onJoinRoom = vm::joinRoom,
+            onSignOut = onSignOut,
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -99,6 +125,7 @@ fun RoomListScreen(
     state: RoomsState,
     signingOut: Boolean,
     signOutError: String?,
+    onOpenRoom: (Room) -> Unit,
     onCreateRoom: (String?, String?) -> Unit,
     onJoinRoom: (String) -> Unit,
     onSignOut: () -> Unit,
@@ -157,7 +184,7 @@ fun RoomListScreen(
                 }
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(state.rooms, key = { it.roomId }) { room ->
-                        RoomRow(room)
+                        RoomRow(room, onClick = { onOpenRoom(room) })
                         HorizontalDivider()
                     }
                 }
@@ -197,10 +224,11 @@ fun RoomListScreen(
 }
 
 @Composable
-private fun RoomRow(room: Room) {
+private fun RoomRow(room: Room, onClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {

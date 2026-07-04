@@ -336,6 +336,46 @@ async fn join_room_posts_to_join_path() {
         .expect("join ok");
 }
 
+// --- Timeline backfill (M2.4) ---------------------------------------------
+
+#[tokio::test]
+async fn fetch_messages_pulls_chunk_and_persists_new_events() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/_pigeon/client/v1/rooms/!r:test.example/messages"))
+        .and(query_param("limit", "50"))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunk": [
+                msg("$a", "!r:test.example", "one"),
+                msg("$b", "!r:test.example", "two"),
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    // Two events land the first time; re-fetching the same chunk is idempotent.
+    let n = client
+        .fetch_messages("!r:test.example".into(), 50)
+        .await
+        .expect("fetch ok");
+    assert_eq!(n, 2);
+    let again = client
+        .fetch_messages("!r:test.example".into(), 50)
+        .await
+        .expect("fetch ok");
+    assert_eq!(again, 0);
+
+    // They are now readable through the timeline, oldest-first.
+    let tl = client
+        .timeline("!r:test.example".into(), 10, None)
+        .expect("timeline ok");
+    assert_eq!(tl.len(), 2);
+    assert_eq!(tl[0].body.as_deref(), Some("one"));
+    assert_eq!(tl[1].body.as_deref(), Some("two"));
+}
+
 #[tokio::test]
 async fn ffi_login_network_failure_is_typed_network_error() {
     // Nothing is listening on this port → a transport failure, not an HTTP

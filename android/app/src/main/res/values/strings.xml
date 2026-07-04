@@ -25,4 +25,8 @@
     <string name="rooms_create_confirm">Create</string>
     <string name="rooms_join_title">Join a room</string>
     <string name="rooms_join_id">Room ID (!room:server)</string>
+
+    <!-- Chat (M2.4) -->
+    <string name="chat_back">Back</string>
+    <string name="chat_empty">No messages yet</string>
 </resources>
