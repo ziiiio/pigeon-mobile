@@ -195,6 +195,7 @@ Stick to these unless you have a specific reason and have discussed it.
 - Keep the network off the UI thread and out of the way of reads — offline-first.
 - Finish what's doable now — complete a stage's endpoints, error paths, and tests in the same change; don't defer buildable work (see "The Completeness Rule").
 - Keep the docs in sync **in the same commit as the code** (see below).
+- **Commit after every completed step** — one green stage, one commit (see "The Commit Rule").
 
 ## What Claude Should Not Do
 
@@ -205,6 +206,16 @@ Stick to these unless you have a specific reason and have discussed it.
 - Don't add Phase N+1 features while in Phase N. A stub/interface for genuinely *blocked* later-phase work is fine; its implementation is not. (This is not licence to defer work you *could* finish now — see "The Completeness Rule".)
 - Don't defer doable work. If a stage already touches it and its dependencies exist, finish it now — don't leave a `TODO`/"later" behind. (The Completeness Rule.)
 - Don't diverge from the server's wire contract to "make this screen easier."
+
+## The Commit Rule
+
+**Commit after each completed step — don't batch.** A "step" is a ROADMAP stage or substage (e.g. `M2.1`, `M2.2`), or a self-contained unit of work the user asked for. When one is done, commit it before starting the next. Do **not** let several stages pile up in the working tree as one mega-diff.
+
+- **One commit per step, and it is complete:** the code, its tests, and the doc updates the change requires (the Documentation Sync Rule) land **together** in that single commit. A commit that leaves a doc contradicting the code, or tests unwritten, is not a finished step.
+- **Green before commit.** Only commit a step once its gate passes — `cargo test` + `cargo clippy -D warnings` + `cargo fmt --check` for core changes, plus `assembleDebug` when the FFI surface or Android side changed. Never commit a red build.
+- **Message convention:** match the existing history — a `M<phase>.<step>:` (or `build(...)`/`docs:`/`dev:`) prefix and a one-line summary of what the step delivered, mirroring commits like `M1.5: logout & token invalidation — closes M1`. End the message with the `Co-Authored-By` trailer the harness specifies.
+- **Commit, not push.** This rule authorizes committing after each step without re-asking. Pushing still waits for an explicit request. This repo's history is linear on `main` (each M-step committed directly, then pushed on request) — follow that convention; don't spin up a branch per step.
+- Unrelated pre-existing cruft in the tree (e.g. stray build artifacts) is **not** part of a step's commit — stage only the files the step actually changed.
 
 ## Documentation Sync Rule
 
