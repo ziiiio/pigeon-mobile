@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file orients Claude (and other AI coding assistants) on the **Pigeon mobile client**. Read it before making non-trivial changes. The companion docs are [`ROADMAP.md`](ROADMAP.md) (the plan) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the structural map).
+This file orients Claude (and other AI coding assistants) on the **Pigeon mobile client**. Read it before making non-trivial changes. The companion docs are [`ROADMAP.md`](ROADMAP.md) (the plan), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the structural map), and [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md) (a narrated, junior-dev walk through the code).
 
 ## Project Summary
 

@@ -79,6 +79,7 @@ Then point the app at that server's address on first launch. The reference CLI i
 - [`CLAUDE.md`](CLAUDE.md) — conventions, gotchas, decisions, the current-phase guard.
 - [`ROADMAP.md`](ROADMAP.md) — the full phased plan and success criteria.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the structural map: core modules, the FFI surface, the build pipeline, end-to-end flows.
+- [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md) — a narrated, junior-developer walk through the actual code (start here to onboard).
 - [`../pigeon`](../pigeon) — the homeserver and the **authoritative protocol source**.
 
 ## Security
