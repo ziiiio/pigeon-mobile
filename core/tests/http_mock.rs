@@ -12,11 +12,14 @@
 use std::sync::{Arc, Mutex};
 
 use pigeon_mobile_core::api::{Api, ErrorCode};
+use pigeon_mobile_core::e2ee::E2ee;
 use pigeon_mobile_core::session;
 use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
 use serde_json::json;
-use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
+use wiremock::matchers::{
+    body_json, body_partial_json, header, method, path, path_regex, query_param,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The `AuthResponse` body both register and login return on success.
@@ -453,6 +456,125 @@ async fn invite_posts_user_id_to_invite_path() {
         .invite("!r:test.example".into(), "@bob:test.example".into())
         .await
         .expect("invite ok");
+}
+
+// --- Encrypted rooms + invite-with-Welcome (M3.4) -------------------------
+
+#[tokio::test]
+async fn create_encrypted_room_posts_encryption_flag() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .and(body_json(json!({ "name": "Secret", "encryption": true })))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!enc:test.example" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let room = client
+        .create_encrypted_room(Some("Secret".into()), None)
+        .await
+        .expect("create encrypted room ok");
+    assert_eq!(room, "!enc:test.example");
+}
+
+#[tokio::test]
+async fn invite_to_encrypted_room_claims_keys_and_ships_welcome() {
+    let server = MockServer::start().await;
+    let alice = logged_in(&server).await;
+
+    // Alice creates an encrypted room she hosts the group for.
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!enc:test.example" })),
+        )
+        .mount(&server)
+        .await;
+    let room = alice
+        .create_encrypted_room(Some("Secret".into()), None)
+        .await
+        .expect("create encrypted room");
+
+    // Bob is a real second device publishing a real KeyPackage (so add_member,
+    // which validates it through openmls, actually succeeds).
+    let bob = E2ee::create("@bob:test.example").expect("bob device");
+    let bob_kp = bob.key_packages(1).expect("bob key package").remove(0);
+
+    // The invite dance: server invite, then query → claim → sendToDevice Welcome.
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/rooms/!enc:test.example/invite"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$inv" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/keys/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "device_keys": { "@bob:test.example": {
+                "BOBDEV": { "user_id": "@bob:test.example", "device_id": "BOBDEV",
+                            "algorithms": ["p.mls.1"], "keys": {}, "signatures": {} }
+            } }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/keys/claim"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "one_time_keys": { "@bob:test.example": {
+                "BOBDEV": { "key_id": "kp-0", "package": bob_kp }
+            } }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The Welcome must be shipped to Bob's device, tagged with the room id. The
+    // opaque `welcome` blob is dynamic, so assert the surrounding shape only.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_pigeon/client/v1/sendToDevice/p\.mls\.welcome/.+$",
+        ))
+        .and(body_partial_json(json!({
+            "messages": { "@bob:test.example": { "BOBDEV": { "room_id": "!enc:test.example" } } }
+        })))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    alice
+        .invite(room.clone(), "@bob:test.example".into())
+        .await
+        .expect("invite to encrypted room ok");
+    assert_eq!(room, "!enc:test.example");
+
+    // End-to-end proof (not just request shapes): pull the Welcome we actually
+    // shipped out of the recorded sendToDevice request and confirm Bob can join
+    // the group from it — i.e. add_member produced a valid, self-contained MLS
+    // Welcome for Bob's real KeyPackage.
+    let requests = server.received_requests().await.expect("recorded requests");
+    let welcome_req = requests
+        .iter()
+        .find(|r| r.url.path().contains("/sendToDevice/p.mls.welcome/"))
+        .expect("a Welcome was sent to-device");
+    let body: serde_json::Value = serde_json::from_slice(&welcome_req.body).unwrap();
+    let welcome = body["messages"]["@bob:test.example"]["BOBDEV"]["welcome"]
+        .as_str()
+        .expect("welcome present in to-device content");
+
+    assert!(!bob.has_group("!enc:test.example").unwrap());
+    bob.join_from_welcome(welcome)
+        .expect("bob joins from Welcome");
+    assert!(
+        bob.has_group("!enc:test.example").unwrap(),
+        "Bob holds the group after joining from the shipped Welcome"
+    );
 }
 
 #[tokio::test]

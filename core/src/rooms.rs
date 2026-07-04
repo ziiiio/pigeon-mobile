@@ -169,9 +169,8 @@ impl PigeonClient {
 // Async writes to the homeserver. Their effects surface via the sync loop.
 #[uniffi::export(async_runtime = "tokio")]
 impl PigeonClient {
-    /// Create a room and return its id. Optional `name`/`topic`. Plaintext for
-    /// M2 (encryption is an M3 concern — created unencrypted here). The room
-    /// appears in `list_rooms` once the running sync loop folds its state in.
+    /// Create a plaintext room and return its id. Optional `name`/`topic`. The
+    /// room appears in `list_rooms` once the running sync loop folds its state in.
     pub async fn create_room(
         &self,
         name: Option<String>,
@@ -181,6 +180,29 @@ impl PigeonClient {
             .api
             .create_room(name.as_deref(), topic.as_deref(), false)
             .await?)
+    }
+
+    /// Create an **encrypted** room and return its id (M3.4). Posts
+    /// `createRoom {encryption:true}` (the server materialises the
+    /// `p.room.encryption` marker) and creates the MLS group locally (group id =
+    /// room id bytes), so we host it and can add members. Requires an MLS identity
+    /// for this session — errors if E2EE is unavailable rather than creating an
+    /// encrypted room we could never use.
+    pub async fn create_encrypted_room(
+        &self,
+        name: Option<String>,
+        topic: Option<String>,
+    ) -> Result<String, CoreError> {
+        let e2ee = self.e2ee.as_ref().ok_or_else(|| CoreError::Crypto {
+            reason: "E2EE is unavailable for this session; cannot create an encrypted room"
+                .to_owned(),
+        })?;
+        let room_id = self
+            .api
+            .create_room(name.as_deref(), topic.as_deref(), true)
+            .await?;
+        e2ee.create_group(&room_id)?;
+        Ok(room_id)
     }
 
     /// Join a room by id. The membership + timeline arrive on the next sync.
@@ -196,8 +218,24 @@ impl PigeonClient {
     /// Invite `user_id` to `room_id` (M2.6). The invite is a `p.room.member`
     /// (membership `invite`) event; it renders in the room's timeline via the
     /// core's system-line rendering, and the invitee accepts by joining the id.
+    ///
+    /// **Encrypted rooms (M3.4):** if we host the room's MLS group, this also runs
+    /// the group-membership dance so the invitee can decrypt — mirroring the
+    /// reference CLI's ordering: server invite first (that's what lets them
+    /// receive the timeline), then claim a KeyPackage from each of the invitee's
+    /// devices, `add_member`, and ship each device its `Welcome` over
+    /// `/sendToDevice` (`p.mls.welcome`). Plaintext rooms skip all of this.
     pub async fn invite(&self, room_id: String, user_id: String) -> Result<(), CoreError> {
+        // Room membership first — this is what lets the invitee receive the
+        // timeline (and, later, the to-device Welcome).
         self.api.invite(&room_id, &user_id).await?;
+
+        // If this is an encrypted room we host, add the invitee to the group.
+        if let Some(e2ee) = self.e2ee.as_ref() {
+            if e2ee.has_group(&room_id)? {
+                self.welcome_to_group(e2ee, &room_id, &user_id).await?;
+            }
+        }
         Ok(())
     }
 
@@ -262,6 +300,39 @@ impl PigeonClient {
         }
         Ok(changed)
     }
+}
+
+impl PigeonClient {
+    /// Add `user_id`'s devices to `room_id`'s MLS group and ship each a `Welcome`
+    /// over `/sendToDevice` (M3.4). Claims one KeyPackage per device, `add_member`
+    /// (self-merging — add-mostly groups), then sends `p.mls.welcome` with
+    /// `{welcome, room_id}` to that device. Never logs key material (Gotcha #2).
+    async fn welcome_to_group(
+        &self,
+        e2ee: &crate::e2ee::E2ee,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<(), CoreError> {
+        let claimed = crate::keys::claim_all_devices(&self.api, user_id).await?;
+        for kp in claimed {
+            let welcome = e2ee.add_member(room_id, &kp.key_package_b64)?;
+            let messages = serde_json::json!({
+                user_id: { kp.device_id: { "welcome": welcome, "room_id": room_id } }
+            });
+            self.api
+                .send_to_device("p.mls.welcome", &next_txn_id(), &messages)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// A unique client transaction id for a to-device send. The server ignores it
+/// (it just identifies the attempt), so a process-local counter suffices.
+fn next_txn_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!("mob-td-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 #[cfg(test)]
