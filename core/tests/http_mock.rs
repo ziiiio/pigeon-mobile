@@ -16,7 +16,7 @@ use pigeon_mobile_core::session;
 use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
 use serde_json::json;
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The `AuthResponse` body both register and login return on success.
@@ -374,6 +374,64 @@ async fn fetch_messages_pulls_chunk_and_persists_new_events() {
     assert_eq!(tl.len(), 2);
     assert_eq!(tl[0].body.as_deref(), Some("one"));
     assert_eq!(tl[1].body.as_deref(), Some("two"));
+}
+
+// --- Send: local echo + delivery (M2.5) -----------------------------------
+
+#[tokio::test]
+async fn send_message_echoes_then_confirms_on_ack() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_pigeon/client/v1/rooms/!r:test\.example/send/p\.room\.message/.+$",
+        ))
+        .and(body_json(
+            json!({ "body": "hi there", "msgtype": "p.text" }),
+        ))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$server" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .send_message("!r:test.example".into(), "hi there".into())
+        .await
+        .expect("send ok");
+
+    // After the ack, the echo is the confirmed server event, not pending.
+    let tl = client
+        .timeline("!r:test.example".into(), 10, None)
+        .expect("timeline ok");
+    assert_eq!(tl.len(), 1);
+    assert_eq!(tl[0].event_id, "$server");
+    assert_eq!(tl[0].body.as_deref(), Some("hi there"));
+    assert!(!tl[0].pending && !tl[0].failed);
+}
+
+#[tokio::test]
+async fn send_message_marks_echo_failed_on_server_rejection() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    // No /send route mounted → the server 404s → a terminal rejection. The echo
+    // survives (offline-first: the message is never lost) but is flagged failed
+    // and dropped from the retry queue so we don't resend it forever.
+    // (The network/offline path — echo stays *pending* for retry — is guaranteed
+    // by queue_send persisting the echo before flush and flush's
+    // `Err(Network) => break`, and is exercised end-to-end by the e2e lane.)
+    client
+        .send_message("!r:test.example".into(), "queued".into())
+        .await
+        .expect("send returns ok");
+
+    let tl = client
+        .timeline("!r:test.example".into(), 10, None)
+        .expect("timeline ok");
+    assert_eq!(tl.len(), 1);
+    assert_eq!(tl[0].body.as_deref(), Some("queued"));
+    assert!(tl[0].failed, "a server rejection flags the echo failed");
+    assert!(!tl[0].pending);
 }
 
 #[tokio::test]

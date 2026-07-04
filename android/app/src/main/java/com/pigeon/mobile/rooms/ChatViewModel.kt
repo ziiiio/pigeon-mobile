@@ -85,6 +85,24 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Send a plaintext message. The core writes a local echo and queues it
+     * (offline-first), so [refresh] afterwards shows the message immediately —
+     * pending, then confirmed once the server acks (or failed on rejection).
+     */
+    fun send(body: String) {
+        val text = body.trim()
+        if (text.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                client.sendMessage(roomId, text)
+            } catch (e: CoreException) {
+                _state.value = _state.value.copy(error = e.message)
+            }
+            refresh()
+        }
+    }
+
     /** Union two pages by event id and order by the opaque cursor (DAG depth). */
     private fun merge(a: List<TimelineEvent>, b: List<TimelineEvent>): List<TimelineEvent> =
         (a + b).distinctBy { it.eventId }.sortedBy { it.cursor }

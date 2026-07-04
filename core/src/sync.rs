@@ -67,10 +67,13 @@ impl PigeonClient {
                 .await
             {
                 Ok(resp) => {
-                    let changed = apply_sync(self, &resp)?;
+                    let applied = apply_sync(self, &resp)?;
+                    // We're online — a good moment to (re)transmit queued sends
+                    // (offline-first retry, M2.5). Either can change the store.
+                    let flushed = self.flush_pending().await?;
                     backoff = BACKOFF_START;
                     observer.on_status(true);
-                    if changed {
+                    if applied || flushed {
                         observer.on_change();
                     }
                 }

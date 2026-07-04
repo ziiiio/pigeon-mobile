@@ -44,7 +44,7 @@ use serde_json::Value;
 use crate::CoreError;
 
 /// The current schema version. Bumped when a migration is added; see [`migrate`].
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// A failure from the local store: either the SQLite layer or a wire event that
 /// wasn't the shape the protocol promised. Surfaced across the FFI as
@@ -117,6 +117,33 @@ pub struct StoredEvent {
     pub content: Value,
     /// The whole event JSON, retained losslessly.
     pub payload: Value,
+    /// Local send state (M2.5): [`SendState::Confirmed`] for a real event from
+    /// the server; [`SendState::Sending`]/[`SendState::Failed`] for a local echo
+    /// still in the outbound queue. Confirmed for anything parsed from the wire.
+    pub send_state: SendState,
+}
+
+/// The delivery state of a timeline event's *own* send (M2.5). Only a local echo
+/// is ever `Sending`/`Failed`; everything from `/sync` is `Confirmed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendState {
+    /// A real, server-acknowledged event (or any event received via sync).
+    Confirmed,
+    /// A local echo whose send is in flight or queued for retry (offline).
+    Sending,
+    /// A local echo whose send failed terminally (e.g. not permitted).
+    Failed,
+}
+
+impl SendState {
+    /// Map the `events.local` column (0/1/2) to a state.
+    fn from_local(local: i64) -> Self {
+        match local {
+            1 => SendState::Sending,
+            2 => SendState::Failed,
+            _ => SendState::Confirmed,
+        }
+    }
 }
 
 impl StoredEvent {
@@ -150,8 +177,21 @@ impl StoredEvent {
             depth: int("depth")?,
             content: event.get("content").cloned().unwrap_or(Value::Null),
             payload: event.clone(),
+            // Anything parsed from the wire is a confirmed, server-side event.
+            send_state: SendState::Confirmed,
         })
     }
+}
+
+/// A queued outbound message awaiting (re)send (M2.5). Held in `pending_sends`
+/// until the server acks it; the sync loop retries these when online.
+#[derive(Debug, Clone)]
+pub struct PendingSend {
+    /// Client transaction id — identifies the attempt (the server ignores it, so
+    /// it's our own dedup key, not the server's).
+    pub txn_id: String,
+    pub room_id: String,
+    pub body: String,
 }
 
 /// A room as it appears in the room list — current-state fields folded from the
@@ -273,18 +313,20 @@ impl Store {
     ) -> Result<Vec<StoredEvent>, StoreError> {
         let guard = self.lock();
         // Select the newest `limit` (optionally strictly older than `before`)
-        // descending, then reverse to oldest-first for display.
-        let sql = "SELECT payload FROM events
+        // descending, then reverse to oldest-first for display. `local` carries
+        // the send state of a local echo (0 for confirmed/synced events).
+        let sql = "SELECT payload, local FROM events
                    WHERE room_id = ?1 AND (?2 IS NULL OR depth < ?2)
                    ORDER BY depth DESC, event_id DESC
                    LIMIT ?3";
         let mut stmt = guard.prepare(sql)?;
         let rows = stmt.query_map(rusqlite::params![room_id, before, limit], |r| {
-            r.get::<_, String>(0)
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
         let mut events = Vec::new();
         for row in rows {
-            events.push(parse_stored_payload(&row?)?);
+            let (payload, local) = row?;
+            events.push(parse_stored_payload(&payload, local)?);
         }
         events.reverse();
         Ok(events)
@@ -364,9 +406,145 @@ impl Store {
             )
             .optional()?;
         match payload {
-            Some(p) => Ok(Some(parse_stored_payload(&p)?)),
+            // A state event is always a confirmed, server-side event (local = 0).
+            Some(p) => Ok(Some(parse_stored_payload(&p, 0)?)),
             None => Ok(None),
         }
+    }
+
+    // --- Outbound send queue + local echo (M2.5) -----------------------------
+
+    /// Queue an outbound message: write a provisional local echo into the
+    /// timeline (so the UI shows it immediately) and a `pending_sends` row for
+    /// the sender to (re)transmit. Returns the transaction id identifying the
+    /// attempt. The echo sits just after the newest known event (depth = max+1)
+    /// and is marked `Sending` until the server acks it.
+    pub fn queue_send(
+        &self,
+        room_id: &str,
+        sender: &str,
+        body: &str,
+    ) -> Result<String, StoreError> {
+        let (txn_id, event_id) = next_send_ids();
+        let ts = now_millis();
+
+        let mut guard = self.lock();
+        let tx = guard.transaction()?;
+        // Place the echo after the newest event in the room.
+        let depth: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(depth), 0) + 1 FROM events WHERE room_id = ?1",
+            [room_id],
+            |r| r.get(0),
+        )?;
+        // Build a full event payload (including `depth`) so a timeline read can
+        // round-trip it back through `StoredEvent::from_wire` like any event.
+        let payload = serde_json::json!({
+            "event_id": event_id,
+            "room_id": room_id,
+            "sender": sender,
+            "type": "p.room.message",
+            "origin_server_ts": ts,
+            "depth": depth,
+            "content": { "body": body, "msgtype": "p.text" },
+        });
+        tx.execute(
+            "INSERT INTO events
+               (event_id, room_id, sender, type, state_key, origin_server_ts, depth, payload, local)
+             VALUES (?1, ?2, ?3, 'p.room.message', NULL, ?4, ?5, ?6, 1)",
+            rusqlite::params![event_id, room_id, sender, ts, depth, payload.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO pending_sends (txn_id, room_id, body, event_id, created_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![txn_id, room_id, body, event_id, ts],
+        )?;
+        tx.commit()?;
+        Ok(txn_id)
+    }
+
+    /// The outbound queue, oldest first — what the sender must (re)transmit.
+    pub fn pending_sends(&self) -> Result<Vec<PendingSend>, StoreError> {
+        let guard = self.lock();
+        let mut stmt = guard.prepare(
+            "SELECT txn_id, room_id, body FROM pending_sends ORDER BY created_ts ASC, txn_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PendingSend {
+                txn_id: r.get(0)?,
+                room_id: r.get(1)?,
+                body: r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Mark a queued send acknowledged by the server under `real_event_id`.
+    /// Promotes the provisional echo to the real id (so the authoritative event
+    /// arriving via `/sync` dedups against it — no duplicate, no flicker), or
+    /// drops the echo if sync already delivered that event. Clears the queue row.
+    pub fn resolve_send(&self, txn_id: &str, real_event_id: &str) -> Result<(), StoreError> {
+        let mut guard = self.lock();
+        let tx = guard.transaction()?;
+        let provisional: Option<String> = tx
+            .query_row(
+                "SELECT event_id FROM pending_sends WHERE txn_id = ?1",
+                [txn_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(provisional) = provisional {
+            let real_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)",
+                [real_event_id],
+                |r| r.get::<_, i64>(0),
+            )? != 0;
+            if real_exists {
+                // Sync raced ahead of the ack: drop the now-redundant echo.
+                tx.execute("DELETE FROM events WHERE event_id = ?1", [&provisional])?;
+            } else {
+                // Promote the echo to the confirmed event in place — rewrite both
+                // the column and the payload's own `event_id` (a timeline read
+                // rebuilds the event from the payload), and clear the local flag.
+                tx.execute(
+                    "UPDATE events
+                        SET event_id = ?1,
+                            local = 0,
+                            payload = json_set(payload, '$.event_id', ?1)
+                      WHERE event_id = ?2",
+                    rusqlite::params![real_event_id, provisional],
+                )?;
+            }
+        }
+        tx.execute("DELETE FROM pending_sends WHERE txn_id = ?1", [txn_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Mark a queued send terminally failed: flag its echo `Failed` and remove it
+    /// from the retry queue. The user sees the message didn't send.
+    pub fn fail_send(&self, txn_id: &str) -> Result<(), StoreError> {
+        let mut guard = self.lock();
+        let tx = guard.transaction()?;
+        if let Some(event_id) = tx
+            .query_row(
+                "SELECT event_id FROM pending_sends WHERE txn_id = ?1",
+                [txn_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            tx.execute(
+                "UPDATE events SET local = 2 WHERE event_id = ?1",
+                [&event_id],
+            )?;
+        }
+        tx.execute("DELETE FROM pending_sends WHERE txn_id = ?1", [txn_id])?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -411,13 +589,38 @@ fn fold_state(conn: &Connection, ev: &StoredEvent) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Rebuild a [`StoredEvent`] from a stored `payload` JSON string. A payload we
-/// wrote that no longer parses is a storage corruption, not a protocol error.
-fn parse_stored_payload(payload: &str) -> Result<StoredEvent, StoreError> {
+/// Rebuild a [`StoredEvent`] from a stored `payload` JSON string plus its
+/// `local` send-state flag. A payload we wrote that no longer parses is a storage
+/// corruption, not a protocol error.
+fn parse_stored_payload(payload: &str, local: i64) -> Result<StoredEvent, StoreError> {
     let value: Value = serde_json::from_str(payload).map_err(|e| StoreError::Malformed {
         reason: format!("corrupt stored event payload: {e}"),
     })?;
-    StoredEvent::from_wire(&value)
+    let mut event = StoredEvent::from_wire(&value)?;
+    event.send_state = SendState::from_local(local);
+    Ok(event)
+}
+
+/// Milliseconds since the Unix epoch — the local echo's display timestamp and
+/// the send queue's ordering key. Best-effort (0 if the clock is before the
+/// epoch); display-only, never an ordering key across devices.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Generate a unique `(txn_id, provisional_event_id)` for an outbound send. The
+/// monotonic counter disambiguates sends within the same millisecond. The
+/// provisional id is prefixed `$local-` so it can never collide with a server
+/// content-hash id (`$<base64>`).
+fn next_send_ids() -> (String, String) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = now_millis();
+    (format!("m{ts}-{n}"), format!("$local-{ts}-{n}"))
 }
 
 /// Bring the schema from whatever version is on disk up to [`SCHEMA_VERSION`].
@@ -461,6 +664,24 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
                 event_id  TEXT NOT NULL REFERENCES events (event_id),
                 depth     INTEGER NOT NULL,
                 PRIMARY KEY (room_id, type, state_key)
+            );
+            ",
+        )?;
+    }
+    if version < 2 {
+        // M2.5: outbound send queue + local echo. `events.local` marks a
+        // provisional echo's send state (0 confirmed, 1 sending, 2 failed);
+        // `pending_sends` is the retry queue keyed by client transaction id.
+        conn.execute_batch(
+            "
+            ALTER TABLE events ADD COLUMN local INTEGER NOT NULL DEFAULT 0;
+
+            CREATE TABLE pending_sends (
+                txn_id     TEXT PRIMARY KEY,
+                room_id    TEXT NOT NULL,
+                body       TEXT NOT NULL,
+                event_id   TEXT NOT NULL,
+                created_ts INTEGER NOT NULL
             );
             ",
         )?;
@@ -861,5 +1082,76 @@ mod tests {
             assert_eq!(store.timeline("!r:s", 10, None).unwrap().len(), 1);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Outbound send queue + local echo (M2.5) -----------------------------
+
+    #[test]
+    fn queue_send_writes_a_pending_echo() {
+        let store = Store::open_in_memory().unwrap();
+        let txn = store.queue_send("!r:s", "@me:s", "hello").unwrap();
+
+        // The echo shows in the timeline immediately, marked Sending.
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].sender, "@me:s");
+        assert_eq!(tl[0].content["body"], "hello");
+        assert_eq!(tl[0].send_state, SendState::Sending);
+
+        // And it's queued for (re)transmission.
+        let pending = store.pending_sends().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].txn_id, txn);
+        assert_eq!(pending[0].body, "hello");
+    }
+
+    #[test]
+    fn resolve_send_promotes_echo_and_clears_queue() {
+        let store = Store::open_in_memory().unwrap();
+        let txn = store.queue_send("!r:s", "@me:s", "hi").unwrap();
+        store.resolve_send(&txn, "$real").unwrap();
+
+        // The echo became the confirmed event under the real id; queue is empty.
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].event_id, "$real");
+        assert_eq!(tl[0].send_state, SendState::Confirmed);
+        assert!(store.pending_sends().unwrap().is_empty());
+
+        // The authoritative event later arriving via sync dedups (no duplicate).
+        store
+            .apply_events(&[message("$real", "!r:s", "@me:s", 9, 900, "hi")])
+            .unwrap();
+        assert_eq!(store.timeline("!r:s", 10, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolve_send_drops_echo_if_sync_raced_ahead() {
+        let store = Store::open_in_memory().unwrap();
+        let txn = store.queue_send("!r:s", "@me:s", "hi").unwrap();
+        // Sync delivered the real event before our ack arrived.
+        store
+            .apply_events(&[message("$real", "!r:s", "@me:s", 9, 900, "hi")])
+            .unwrap();
+        store.resolve_send(&txn, "$real").unwrap();
+
+        // Exactly one copy remains (the confirmed one); no leftover echo.
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].event_id, "$real");
+        assert_eq!(tl[0].send_state, SendState::Confirmed);
+    }
+
+    #[test]
+    fn fail_send_flags_echo_and_dequeues() {
+        let store = Store::open_in_memory().unwrap();
+        let txn = store.queue_send("!r:s", "@me:s", "nope").unwrap();
+        store.fail_send(&txn).unwrap();
+
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].send_state, SendState::Failed);
+        // Removed from the retry queue — we won't keep resending it.
+        assert!(store.pending_sends().unwrap().is_empty());
     }
 }

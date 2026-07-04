@@ -3,15 +3,20 @@ package com.pigeon.mobile.rooms
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -21,9 +26,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -67,6 +76,7 @@ fun ChatRoute(
         state = state,
         onBack = onBack,
         onLoadOlder = vm::loadOlder,
+        onSend = vm::send,
     )
 }
 
@@ -78,6 +88,7 @@ fun ChatScreen(
     state: ChatState,
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
+    onSend: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
 
@@ -101,6 +112,7 @@ fun ChatScreen(
                 },
             )
         },
+        bottomBar = { Composer(onSend = onSend) },
     ) { padding ->
         Box(
             modifier = Modifier
@@ -164,10 +176,30 @@ private fun TimelineRow(event: TimelineEvent, mine: Boolean) {
                     MaterialTheme.colorScheme.surfaceVariant
                 },
                 shape = MaterialTheme.shapes.medium,
+                // Dim a message whose send is still in flight (local echo).
+                modifier = Modifier.alpha(if (event.pending) 0.5f else 1f),
             ) {
                 Text(
                     text = body,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+            // Send status for the user's own messages (M2.5).
+            val status = when {
+                event.failed -> stringResource(R.string.chat_not_sent)
+                event.pending -> stringResource(R.string.chat_sending)
+                else -> null
+            }
+            status?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (event.failed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp),
                 )
             }
         }
@@ -183,5 +215,40 @@ private fun TimelineRow(event: TimelineEvent, mine: Boolean) {
         )
         // Nothing renderable (hidden event type) — draw nothing.
         else -> Unit
+    }
+}
+
+@Composable
+private fun Composer(onSend: (String) -> Unit) {
+    var text by rememberSaveable { mutableStateOf("") }
+    Column {
+        HorizontalDivider()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(8.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text(stringResource(R.string.chat_message_hint)) },
+                maxLines = 4,
+            )
+            TextButton(
+                onClick = {
+                    if (text.isNotBlank()) {
+                        onSend(text)
+                        text = ""
+                    }
+                },
+                enabled = text.isNotBlank(),
+            ) {
+                Text(stringResource(R.string.chat_send))
+            }
+        }
     }
 }

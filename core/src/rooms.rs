@@ -9,7 +9,7 @@
 //! a write's return value for state.
 
 use crate::session::PigeonClient;
-use crate::store::{RoomSummary, StoredEvent};
+use crate::store::{RoomSummary, SendState, StoredEvent};
 use crate::CoreError;
 
 /// A room in the room list — folded current state from the store. The FFI record
@@ -66,6 +66,11 @@ pub struct TimelineEvent {
     pub body: Option<String>,
     /// A pre-rendered system line for a state/membership event, else `None`.
     pub system_text: Option<String>,
+    /// A local echo whose send is still in flight / queued (offline). The UI
+    /// dims it and shows a "sending" hint (M2.5).
+    pub pending: bool,
+    /// A local echo whose send failed terminally. The UI marks it "not sent".
+    pub failed: bool,
 }
 
 impl From<StoredEvent> for TimelineEvent {
@@ -91,6 +96,8 @@ impl From<StoredEvent> for TimelineEvent {
             cursor: ev.depth,
             body,
             system_text,
+            pending: ev.send_state == SendState::Sending,
+            failed: ev.send_state == SendState::Failed,
         }
     }
 }
@@ -196,6 +203,53 @@ impl PigeonClient {
         let chunk: Vec<serde_json::Value> = resp["chunk"].as_array().cloned().unwrap_or_default();
         Ok(self.store.apply_events(&chunk)? as u32)
     }
+
+    /// Send a plaintext message (M2.5). Offline-first with **local echo**: the
+    /// message is written to the store immediately (so the timeline shows it as
+    /// "sending") and queued, then a flush attempts delivery. This returns once
+    /// the queued echo exists — it does not fail if the network is down; the
+    /// message stays queued and the sync loop retries it (see [`flush_pending`]).
+    /// The caller re-reads the timeline to see the echo and its state.
+    pub async fn send_message(&self, room_id: String, body: String) -> Result<(), CoreError> {
+        self.store
+            .queue_send(&room_id, &self.session().user_id, &body)?;
+        // Best-effort immediate delivery; leftover/queued sends are retried by
+        // the sync loop. A transport failure here is not an error to the caller.
+        self.flush_pending().await?;
+        Ok(())
+    }
+
+    /// Attempt to deliver every queued outbound message, oldest first, and return
+    /// whether the store changed (an echo was confirmed or marked failed) so the
+    /// caller can refresh. Called after `send_message` and once per sync cycle
+    /// (offline-first retry). A transport error stops the pass — the remaining
+    /// sends stay queued for the next attempt; a server rejection fails that one
+    /// send terminally and moves on.
+    pub async fn flush_pending(&self) -> Result<bool, CoreError> {
+        let mut changed = false;
+        for send in self.store.pending_sends()? {
+            let content = serde_json::json!({ "body": send.body, "msgtype": "p.text" });
+            match self
+                .api
+                .send_message(&send.room_id, &send.txn_id, &content)
+                .await
+            {
+                Ok(event_id) => {
+                    self.store.resolve_send(&send.txn_id, &event_id)?;
+                    changed = true;
+                }
+                // Offline: leave this and the rest queued; retry next cycle.
+                Err(crate::api::ApiError::Network { .. }) => break,
+                // The server rejected it (e.g. no longer joined): fail it so the
+                // user sees it didn't send, and continue with the others.
+                Err(_) => {
+                    self.store.fail_send(&send.txn_id)?;
+                    changed = true;
+                }
+            }
+        }
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +272,7 @@ mod tests {
             depth: 3,
             content: content.clone(),
             payload: content,
+            send_state: SendState::Confirmed,
         }
     }
 
