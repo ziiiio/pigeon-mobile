@@ -1,3 +1,4 @@
+
 # claude-sandbox — the pigeon-mobile dev toolchain + Claude Code, for running an
 # autonomous session with `--dangerously-skip-permissions` inside an isolated,
 # read-only container. The only writable surfaces at runtime are the bind-mounted
@@ -6,8 +7,9 @@
 #
 # Build (the base image must exist first — `docker compose build dev`):
 #   docker build -f docker/Dockerfile.sandbox -t claude-sandbox .
-# Run (wires the correct mounts/env for you):
-#   ANTHROPIC_API_KEY=… ./scripts/claude-sandbox.sh
+# Run (wires the correct mounts/auth for you — reuses your host Claude login, so
+# no API key is needed on a Pro/Max subscription):
+#   ./scripts/claude-sandbox.sh
 #
 # Capability: this reuses the dev image, whose toolchain now matches the host
 # (JDK 25 / SDK 36 / NDK r28c), so both the Rust **core** (`cargo test`/`clippy`/
@@ -36,3 +38,10 @@ ENV IS_SANDBOX=1 \
 
 # Pre-create the mountpoints so they exist even under a read-only rootfs.
 RUN mkdir -p /cargo /gradle
+
+# Seed the host's Claude login into the ephemeral $HOME at start (see the script
+# and the entrypoint) so a subscription session needs no API key, without ever
+# writing to the host's real credentials.
+COPY docker/sandbox-entrypoint.sh /usr/local/bin/sandbox-entrypoint
+RUN chmod +x /usr/local/bin/sandbox-entrypoint
+ENTRYPOINT ["/usr/local/bin/sandbox-entrypoint"]
