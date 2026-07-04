@@ -59,11 +59,19 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
     /**
      * Create a room. Its state arrives via the sync loop, which reloads the list
      * on change — so there's nothing to merge here beyond surfacing an error.
+     * When [encrypted], the core creates the room E2EE (marks it + hosts the MLS
+     * group); the UI is otherwise identical (encryption is transparent, M3).
      */
-    fun createRoom(name: String?, topic: String?) {
+    fun createRoom(name: String?, topic: String?, encrypted: Boolean) {
         viewModelScope.launch {
             try {
-                client.createRoom(name?.ifBlank { null }, topic?.ifBlank { null })
+                val n = name?.ifBlank { null }
+                val t = topic?.ifBlank { null }
+                if (encrypted) {
+                    client.createEncryptedRoom(n, t)
+                } else {
+                    client.createRoom(n, t)
+                }
             } catch (e: CoreException) {
                 _state.value = _state.value.copy(actionError = e.message)
             }

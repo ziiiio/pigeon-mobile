@@ -24,6 +24,10 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde_json = "1"
+# Raw HTTP for the E2EE exit gate: fetch the room's stored events directly from
+# the server to assert they contain only ciphertext, never plaintext (the mirror
+# of the homeserver's own `e2ee_message` test). Test-lane only.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [[test]]
 name = "oneshot"

@@ -2693,6 +2693,7 @@ dependencies = [
  "anyhow",
  "axum",
  "pigeon-mobile-core",
+ "reqwest",
  "serde_json",
  "tests-integration",
  "tokio",

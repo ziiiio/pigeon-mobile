@@ -177,6 +177,107 @@ async fn two_clients_hold_a_plaintext_conversation() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The M3 exit gate: two clients exchange **real MLS-encrypted** messages through
+/// the real homeserver. Alice creates an encrypted room and invites Bob (which
+/// claims his KeyPackage, adds him to the group, and ships the Welcome
+/// to-device); Bob's sync joins the group and decrypts Alice's message; the reply
+/// round-trips. Finally we fetch the room's stored events straight from the server
+/// and assert they carry only ciphertext — the server never sees plaintext.
+#[tokio::test]
+async fn two_clients_exchange_encrypted_messages() -> anyhow::Result<()> {
+    let store = MemStore::default();
+    set_key_store(Box::new(store.clone()));
+    let (base, _ts) = spawn().await?;
+
+    // Two real accounts; each publishes its device keys on register.
+    let alice = register(base.clone(), "alice".into(), "hunter2".into()).await?;
+    let bob = register(base.clone(), "bob".into(), "hunter2".into()).await?;
+    let bob_id = bob.session().user_id.clone();
+
+    // Alice creates an ENCRYPTED room and invites Bob — this claims Bob's
+    // KeyPackage, adds him to the MLS group, and sends the Welcome to-device.
+    let room = alice
+        .create_encrypted_room(Some("secret room".into()), None)
+        .await?;
+    alice.invite(room.clone(), bob_id.clone()).await?;
+    // Bob accepts (server-side membership) so he receives the timeline.
+    bob.join_room(room.clone()).await?;
+
+    let alice_sync = spawn_sync(alice.clone());
+    let bob_sync = spawn_sync(bob.clone());
+
+    // Alice sends an encrypted message. Bob's sync must pick up the Welcome (via
+    // to_device), join the group, and DECRYPT the message — proving real MLS
+    // interop through the real server, not a canned mock.
+    let secret = "the eagle lands at dawn";
+    alice.send_message(room.clone(), secret.into()).await?;
+    {
+        let bob = bob.clone();
+        let room = room.clone();
+        wait_until("bob decrypts alice's encrypted message", || {
+            bob.timeline(room.clone(), 100, None)
+                .unwrap()
+                .iter()
+                .any(|e| e.body.as_deref() == Some(secret))
+        })
+        .await;
+    }
+
+    // Bob replies (encrypted); Alice decrypts — a full encrypted round-trip.
+    let reply = "roger, moving in";
+    bob.send_message(room.clone(), reply.into()).await?;
+    {
+        let alice = alice.clone();
+        let room = room.clone();
+        wait_until("alice decrypts bob's encrypted reply", || {
+            alice
+                .timeline(room.clone(), 100, None)
+                .unwrap()
+                .iter()
+                .any(|e| e.body.as_deref() == Some(reply))
+        })
+        .await;
+    }
+
+    // The server only ever saw ciphertext: fetch the room's stored events straight
+    // from the homeserver (with Bob's token, pulled from the persisted blob) and
+    // assert no plaintext appears, and that the messages are p.room.encrypted.
+    let token = {
+        let map = store.map.lock().unwrap();
+        let blob = map
+            .get("pigeon.session.v1")
+            .expect("a session blob is persisted");
+        let v: serde_json::Value = serde_json::from_slice(blob).unwrap();
+        v["access_token"].as_str().unwrap().to_owned()
+    };
+    let url = format!("{base}/_pigeon/client/v1/rooms/{room}/messages?limit=100");
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let raw = body.to_string();
+    assert!(
+        !raw.contains(secret) && !raw.contains(reply),
+        "the server must never see message plaintext"
+    );
+    let chunk = body["chunk"].as_array().expect("messages chunk");
+    let encrypted_count = chunk
+        .iter()
+        .filter(|e| e["type"] == "p.room.encrypted")
+        .count();
+    assert!(
+        encrypted_count >= 2,
+        "both messages are stored as p.room.encrypted ciphertext (got {encrypted_count})"
+    );
+
+    alice_sync.abort();
+    bob_sync.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn register_login_restore_against_real_homeserver() -> anyhow::Result<()> {
     // A key store must be installed so login/register persist and restore has

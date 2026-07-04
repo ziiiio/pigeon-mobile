@@ -17,6 +17,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -100,6 +101,7 @@ fun RoomListRoute(
             client = client,
             roomId = current.roomId,
             roomTitle = current.name ?: current.roomId,
+            encrypted = current.encrypted,
             myUserId = session.userId,
             changes = changes,
             onBack = { openRoom = null },
@@ -126,7 +128,7 @@ fun RoomListScreen(
     signingOut: Boolean,
     signOutError: String?,
     onOpenRoom: (Room) -> Unit,
-    onCreateRoom: (String?, String?) -> Unit,
+    onCreateRoom: (String?, String?, Boolean) -> Unit,
     onJoinRoom: (String) -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -206,8 +208,8 @@ fun RoomListScreen(
     if (showCreate) {
         CreateRoomDialog(
             onDismiss = { showCreate = false },
-            onCreate = { name, topic ->
-                onCreateRoom(name, topic)
+            onCreate = { name, topic, encrypted ->
+                onCreateRoom(name, topic, encrypted)
                 showCreate = false
             },
         )
@@ -261,9 +263,10 @@ private fun RoomRow(room: Room, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CreateRoomDialog(onDismiss: () -> Unit, onCreate: (String?, String?) -> Unit) {
+private fun CreateRoomDialog(onDismiss: () -> Unit, onCreate: (String?, String?, Boolean) -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     var topic by rememberSaveable { mutableStateOf("") }
+    var encrypted by rememberSaveable { mutableStateOf(true) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.rooms_create_title)) },
@@ -281,10 +284,24 @@ private fun CreateRoomDialog(onDismiss: () -> Unit, onCreate: (String?, String?)
                     label = { Text(stringResource(R.string.rooms_create_topic)) },
                     singleLine = true,
                 )
+                // End-to-end encryption is on by default; the room's messages are
+                // MLS-encrypted end to end (transparent to the rest of the UI, M3).
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { encrypted = !encrypted },
+                ) {
+                    Text(
+                        text = stringResource(R.string.rooms_create_encrypted),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(checked = encrypted, onCheckedChange = { encrypted = it })
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onCreate(name, topic) }) {
+            TextButton(onClick = { onCreate(name, topic, encrypted) }) {
                 Text(stringResource(R.string.rooms_create_confirm))
             }
         },

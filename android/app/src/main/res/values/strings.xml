@@ -23,6 +23,8 @@
     <string name="rooms_create_name">Name (optional)</string>
     <string name="rooms_create_topic">Topic (optional)</string>
     <string name="rooms_create_confirm">Create</string>
+    <string name="rooms_create_encrypted">End-to-end encrypted</string>
+    <string name="rooms_lock">🔒</string>
     <string name="rooms_join_title">Join a room</string>
     <string name="rooms_join_id">Room ID (!room:server)</string>
 

@@ -57,6 +57,7 @@ fun ChatRoute(
     client: PigeonClient,
     roomId: String,
     roomTitle: String,
+    encrypted: Boolean,
     myUserId: String,
     changes: StateFlow<Long>,
     onBack: () -> Unit,
@@ -73,6 +74,7 @@ fun ChatRoute(
 
     ChatScreen(
         title = roomTitle,
+        encrypted = encrypted,
         myUserId = myUserId,
         state = state,
         onBack = onBack,
@@ -86,6 +88,7 @@ fun ChatRoute(
 @Composable
 fun ChatScreen(
     title: String,
+    encrypted: Boolean,
     myUserId: String,
     state: ChatState,
     onBack: () -> Unit,
@@ -110,7 +113,17 @@ fun ChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(title, maxLines = 1) },
+                title = {
+                    // A lock prefix marks an end-to-end-encrypted room (M3.6).
+                    Text(
+                        text = if (encrypted) {
+                            "${stringResource(R.string.rooms_lock)} $title"
+                        } else {
+                            title
+                        },
+                        maxLines = 1,
+                    )
+                },
                 navigationIcon = {
                     TextButton(onClick = onBack) { Text(stringResource(R.string.chat_back)) }
                 },
