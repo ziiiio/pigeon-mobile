@@ -384,19 +384,32 @@ impl Api {
         self.send(req).await
     }
 
-    /// `PUT /rooms/{room_id}/send/p.room.message/{txn_id}` → the event id.
-    /// `content` is the raw message content (`{ body, msgtype }`). The server
+    /// `PUT /rooms/{room_id}/send/{event_type}/{txn_id}` → the event id. `content`
+    /// is the raw event content (`{ body, msgtype }` for `p.room.message`, or
+    /// `{ algorithm, ciphertext }` for `p.room.encrypted` — M3.5). The server
     /// ignores `txn_id` (no server-side dedup — CLAUDE.md M2 note), so the client
     /// dedups its own sends; the id still identifies the attempt in the path.
+    pub async fn send_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        txn_id: &str,
+        content: &Value,
+    ) -> Result<String, ApiError> {
+        let path = format!("/_pigeon/client/v1/rooms/{room_id}/send/{event_type}/{txn_id}");
+        let resp = self.put(&path, content).await?;
+        json_string(&resp, "event_id")
+    }
+
+    /// Send a plaintext `p.room.message` — a thin wrapper over [`send_event`].
     pub async fn send_message(
         &self,
         room_id: &str,
         txn_id: &str,
         content: &Value,
     ) -> Result<String, ApiError> {
-        let path = format!("/_pigeon/client/v1/rooms/{room_id}/send/p.room.message/{txn_id}");
-        let resp = self.put(&path, content).await?;
-        json_string(&resp, "event_id")
+        self.send_event(room_id, "p.room.message", txn_id, content)
+            .await
     }
 
     /// Send a built request: parse JSON on 2xx, else map the `P_*` error body.

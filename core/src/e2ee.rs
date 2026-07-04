@@ -154,6 +154,43 @@ impl E2ee {
         device.join_from_welcome(&welcome)?;
         persist(&device)
     }
+
+    /// Encrypt `plaintext` for `room_id`'s group (M3.5); returns base64 ciphertext
+    /// for a `p.room.encrypted` event's `content.ciphertext`. Persists (the
+    /// sender ratchet advances). Errors if we don't hold the room's group.
+    pub fn encrypt(&self, room_id: &str, plaintext: &str) -> Result<String, CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let mut group = load_group(&device, room_id)?;
+        let ciphertext = device.encrypt(&mut group, plaintext.as_bytes())?;
+        persist(&device)?;
+        Ok(STANDARD.encode(ciphertext))
+    }
+
+    /// Decrypt a base64 `p.room.encrypted` ciphertext for `room_id`'s group
+    /// (M3.5); returns the plaintext. Persists (the ratchet advances and is
+    /// persisted — the caller must cache the plaintext, since re-decrypting the
+    /// same message later fails, Gotcha #3). Errors if we don't hold the group,
+    /// the ciphertext is malformed/tampered, or it's not decryptable for us.
+    pub fn decrypt(&self, room_id: &str, ciphertext_b64: &str) -> Result<String, CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let mut group = load_group(&device, room_id)?;
+        let ciphertext = decode_wire(ciphertext_b64, "ciphertext")?;
+        let plaintext = device.decrypt(&mut group, &ciphertext)?;
+        persist(&device)?;
+        String::from_utf8(plaintext).map_err(|e| CoreError::Crypto {
+            reason: format!("decrypted bytes are not UTF-8: {e}"),
+        })
+    }
+}
+
+/// Load `room_id`'s MLS group from device storage, or a typed error if we don't
+/// hold it (not an encrypted room we're a member of).
+fn load_group(device: &Device, room_id: &str) -> Result<pigeon_crypto::Group, CoreError> {
+    device
+        .load_group(room_id.as_bytes())?
+        .ok_or_else(|| CoreError::Crypto {
+            reason: format!("no MLS group for {room_id}"),
+        })
 }
 
 /// Decode a base64 wire blob (KeyPackage/Welcome/ciphertext); a bad encoding is a
@@ -293,6 +330,40 @@ mod tests {
 
         // Both now hold the group for the room (group id = room id bytes).
         assert!(bob.has_group("!room:test.example").unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn encrypt_decrypt_round_trip_and_negatives() {
+        set_key_store(Box::new(MemStore::default()));
+        let alice = E2ee::create("@alice:test.example").unwrap();
+        let bob = E2ee::create("@bob:test.example").unwrap();
+        let carol = E2ee::create("@carol:test.example").unwrap();
+
+        // Establish a shared group: alice hosts, bob joins via Welcome.
+        let bob_kp = bob.key_packages(1).unwrap().remove(0);
+        alice.create_group("!room:test.example").unwrap();
+        let welcome = alice.add_member("!room:test.example", &bob_kp).unwrap();
+        bob.join_from_welcome(&welcome).unwrap();
+
+        // Alice → Bob round-trip.
+        let ct = alice.encrypt("!room:test.example", "hello bob").unwrap();
+        assert_eq!(bob.decrypt("!room:test.example", &ct).unwrap(), "hello bob");
+
+        // Negative: an outsider (carol, no group) cannot decrypt — and can't even
+        // encrypt (she doesn't hold the group).
+        assert!(carol.decrypt("!room:test.example", &ct).is_err());
+        assert!(carol.encrypt("!room:test.example", "sneak").is_err());
+
+        // Negative: a tampered ciphertext fails cleanly (no panic).
+        let mut tampered = ct.clone();
+        tampered.insert(0, 'A'); // corrupt the base64/MLS bytes
+        assert!(bob.decrypt("!room:test.example", &tampered).is_err());
+
+        // Negative: valid base64 that isn't an MLS message.
+        assert!(bob
+            .decrypt("!room:test.example", &STANDARD.encode(b"garbage"))
+            .is_err());
     }
 
     #[test]

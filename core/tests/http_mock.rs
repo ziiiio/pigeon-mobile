@@ -578,6 +578,60 @@ async fn invite_to_encrypted_room_claims_keys_and_ships_welcome() {
 }
 
 #[tokio::test]
+async fn send_in_encrypted_room_puts_p_room_encrypted_ciphertext() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!enc:test.example" })),
+        )
+        .mount(&server)
+        .await;
+    let room = client
+        .create_encrypted_room(None, None)
+        .await
+        .expect("create encrypted room");
+
+    // A send in this room must go out as p.room.encrypted ciphertext — never the
+    // plaintext body. The server only ever sees ciphertext.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_pigeon/client/v1/rooms/!enc:test\.example/send/p\.room\.encrypted/.+$",
+        ))
+        .and(body_partial_json(json!({ "algorithm": "p.mls.1" })))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$enc1" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .send_message(room.clone(), "top secret".into())
+        .await
+        .expect("send ok");
+
+    // The recorded request carries ciphertext, not the plaintext body.
+    let requests = server.received_requests().await.expect("recorded requests");
+    let send = requests
+        .iter()
+        .find(|r| r.url.path().contains("/send/p.room.encrypted/"))
+        .expect("an encrypted send was made");
+    let body = String::from_utf8_lossy(&send.body);
+    assert!(body.contains("ciphertext"), "carries ciphertext");
+    assert!(
+        !body.contains("top secret"),
+        "the plaintext body must never be sent"
+    );
+
+    // Locally, the sender still sees the plaintext (its own echo, promoted to the
+    // server's event id — it can't self-decrypt its own MLS message).
+    let tl = client.timeline(room, 10, None).unwrap();
+    assert_eq!(tl.last().unwrap().body.as_deref(), Some("top secret"));
+}
+
+#[tokio::test]
 async fn ffi_login_network_failure_is_typed_network_error() {
     // Nothing is listening on this port → a transport failure, not an HTTP
     // error. It must surface as the retryable `CoreError::Network`.

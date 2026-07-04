@@ -44,7 +44,7 @@ use serde_json::Value;
 use crate::CoreError;
 
 /// The current schema version. Bumped when a migration is added; see [`migrate`].
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// A failure from the local store: either the SQLite layer or a wire event that
 /// wasn't the shape the protocol promised. Surfaced across the FFI as
@@ -121,6 +121,15 @@ pub struct StoredEvent {
     /// the server; [`SendState::Sending`]/[`SendState::Failed`] for a local echo
     /// still in the outbound queue. Confirmed for anything parsed from the wire.
     pub send_state: SendState,
+    /// Decrypted plaintext body of a `p.room.encrypted` event, cached on first
+    /// decrypt (M3.5). `Some` once decrypted (the ratchet advances and is
+    /// persisted, so we never re-decrypt — Gotcha #3); `None` for plaintext
+    /// events, or an encrypted event not yet / never decrypted.
+    pub decrypted: Option<String>,
+    /// A `p.room.encrypted` event whose decryption failed terminally (M3.5) —
+    /// the UI shows an "unable to decrypt" placeholder. Distinct from "not yet
+    /// attempted" (which stays hidden until the sync loop decrypts it).
+    pub decrypt_failed: bool,
 }
 
 /// The delivery state of a timeline event's *own* send (M2.5). Only a local echo
@@ -179,6 +188,10 @@ impl StoredEvent {
             payload: event.clone(),
             // Anything parsed from the wire is a confirmed, server-side event.
             send_state: SendState::Confirmed,
+            // Decryption fields come from the DB row, not the wire; a freshly
+            // parsed wire event is not-yet-decrypted.
+            decrypted: None,
+            decrypt_failed: false,
         })
     }
 }
@@ -192,6 +205,17 @@ pub struct PendingSend {
     pub txn_id: String,
     pub room_id: String,
     pub body: String,
+}
+
+/// A `p.room.encrypted` event awaiting decryption (M3.5). The sync loop decrypts
+/// these in DAG order (the MLS ratchet is order-sensitive — Gotcha #3) and caches
+/// the plaintext, so each is decrypted exactly once.
+#[derive(Debug, Clone)]
+pub struct PendingDecrypt {
+    pub event_id: String,
+    pub room_id: String,
+    /// The base64 MLS ciphertext (`content.ciphertext`).
+    pub ciphertext_b64: String,
 }
 
 /// A room as it appears in the room list — current-state fields folded from the
@@ -314,19 +338,31 @@ impl Store {
         let guard = self.lock();
         // Select the newest `limit` (optionally strictly older than `before`)
         // descending, then reverse to oldest-first for display. `local` carries
-        // the send state of a local echo (0 for confirmed/synced events).
-        let sql = "SELECT payload, local FROM events
+        // the send state of a local echo (0 for confirmed/synced events);
+        // `decrypted`/`decrypt_state` carry the cached plaintext of an encrypted
+        // event (M3.5).
+        let sql = "SELECT payload, local, decrypted, decrypt_state FROM events
                    WHERE room_id = ?1 AND (?2 IS NULL OR depth < ?2)
                    ORDER BY depth DESC, event_id DESC
                    LIMIT ?3";
         let mut stmt = guard.prepare(sql)?;
         let rows = stmt.query_map(rusqlite::params![room_id, before, limit], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
         })?;
         let mut events = Vec::new();
         for row in rows {
-            let (payload, local) = row?;
-            events.push(parse_stored_payload(&payload, local)?);
+            let (payload, local, decrypted, decrypt_state) = row?;
+            events.push(parse_stored_payload(
+                &payload,
+                local,
+                decrypted,
+                decrypt_state,
+            )?);
         }
         events.reverse();
         Ok(events)
@@ -406,8 +442,9 @@ impl Store {
             )
             .optional()?;
         match payload {
-            // A state event is always a confirmed, server-side event (local = 0).
-            Some(p) => Ok(Some(parse_stored_payload(&p, 0)?)),
+            // A state event is always a confirmed, server-side event (local = 0)
+            // and is never encrypted (no decrypted plaintext to carry).
+            Some(p) => Ok(Some(parse_stored_payload(&p, 0, None, 0)?)),
             None => Ok(None),
         }
     }
@@ -546,6 +583,64 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    // --- Encrypted-message plaintext cache (M3.5) ----------------------------
+
+    /// The `p.room.encrypted` events not yet decrypted, in DAG order (`depth ASC,
+    /// event_id ASC`). The MLS ratchet advances per decrypt and is order-sensitive
+    /// (Gotcha #3), so the caller must decrypt these in exactly this order and
+    /// exactly once. Events with no `content.ciphertext` are skipped (malformed —
+    /// they'd never decrypt).
+    pub fn pending_decrypts(&self) -> Result<Vec<PendingDecrypt>, StoreError> {
+        let guard = self.lock();
+        let mut stmt = guard.prepare(
+            "SELECT event_id, room_id, json_extract(payload, '$.content.ciphertext')
+             FROM events
+             WHERE type = 'p.room.encrypted' AND decrypt_state = 0
+             ORDER BY depth ASC, event_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (event_id, room_id, ciphertext) = row?;
+            if let Some(ciphertext_b64) = ciphertext {
+                out.push(PendingDecrypt {
+                    event_id,
+                    room_id,
+                    ciphertext_b64,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Cache the decrypted plaintext of an encrypted event (M3.5) and mark it
+    /// decrypted, so it renders as a normal message and is never re-decrypted
+    /// (the ratchet has already advanced — Gotcha #3).
+    pub fn set_decrypted(&self, event_id: &str, plaintext: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "UPDATE events SET decrypted = ?2, decrypt_state = ?3 WHERE event_id = ?1",
+            rusqlite::params![event_id, plaintext, DECRYPT_OK],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an encrypted event as terminally undecryptable (M3.5) — the ratchet
+    /// couldn't produce the plaintext (wrong epoch / tampered / not a member). The
+    /// UI shows an "unable to decrypt" placeholder; we won't retry.
+    pub fn set_decrypt_failed(&self, event_id: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "UPDATE events SET decrypt_state = ?2 WHERE event_id = ?1",
+            rusqlite::params![event_id, DECRYPT_FAILED],
+        )?;
+        Ok(())
+    }
 }
 
 /// Append one event to the log; idempotent on `event_id`. Returns 1 if the row
@@ -590,16 +685,28 @@ fn fold_state(conn: &Connection, ev: &StoredEvent) -> Result<(), StoreError> {
 }
 
 /// Rebuild a [`StoredEvent`] from a stored `payload` JSON string plus its
-/// `local` send-state flag. A payload we wrote that no longer parses is a storage
-/// corruption, not a protocol error.
-fn parse_stored_payload(payload: &str, local: i64) -> Result<StoredEvent, StoreError> {
+/// `local` send-state flag and its `decrypted`/`decrypt_state` columns (M3.5). A
+/// payload we wrote that no longer parses is a storage corruption, not a protocol
+/// error.
+fn parse_stored_payload(
+    payload: &str,
+    local: i64,
+    decrypted: Option<String>,
+    decrypt_state: i64,
+) -> Result<StoredEvent, StoreError> {
     let value: Value = serde_json::from_str(payload).map_err(|e| StoreError::Malformed {
         reason: format!("corrupt stored event payload: {e}"),
     })?;
     let mut event = StoredEvent::from_wire(&value)?;
     event.send_state = SendState::from_local(local);
+    event.decrypted = decrypted;
+    event.decrypt_failed = decrypt_state == DECRYPT_FAILED;
     Ok(event)
 }
+
+/// `decrypt_state` column values (M3.5). 0 = not applicable / not yet attempted.
+const DECRYPT_OK: i64 = 1;
+const DECRYPT_FAILED: i64 = 2;
 
 /// Milliseconds since the Unix epoch — the local echo's display timestamp and
 /// the send queue's ordering key. Best-effort (0 if the clock is before the
@@ -683,6 +790,22 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
                 event_id   TEXT NOT NULL,
                 created_ts INTEGER NOT NULL
             );
+            ",
+        )?;
+    }
+    if version < 3 {
+        // M3.5: cache decrypted plaintext of encrypted events. `decrypted` holds
+        // the plaintext once decrypted; `decrypt_state` is 0 (n/a or pending),
+        // 1 (decrypted — plaintext cached), or 2 (terminally undecryptable). The
+        // ratchet advances on decrypt and is persisted, so plaintext is cached
+        // rather than re-derived (Gotcha #3).
+        conn.execute_batch(
+            "
+            ALTER TABLE events ADD COLUMN decrypted TEXT;
+            ALTER TABLE events ADD COLUMN decrypt_state INTEGER NOT NULL DEFAULT 0;
+            -- Find undecrypted encrypted events fast (the sync loop's decrypt pass).
+            CREATE INDEX idx_events_pending_decrypt
+                ON events (type, decrypt_state) WHERE type = 'p.room.encrypted';
             ",
         )?;
     }
@@ -1140,6 +1263,102 @@ mod tests {
         assert_eq!(tl.len(), 1);
         assert_eq!(tl[0].event_id, "$real");
         assert_eq!(tl[0].send_state, SendState::Confirmed);
+    }
+
+    // --- Encrypted-message plaintext cache (M3.5) ----------------------------
+
+    fn encrypted(id: &str, room: &str, depth: i64, ciphertext: &str) -> Value {
+        event(
+            id,
+            room,
+            "@alice:s",
+            depth,
+            depth * 100,
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": ciphertext }),
+        )
+    }
+
+    #[test]
+    fn pending_decrypts_returns_encrypted_events_in_dag_order() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[
+                encrypted("$e2", "!r:s", 2, "CT2"),
+                message("$m", "!r:s", "@a:s", 1, 100, "plaintext"),
+                encrypted("$e1", "!r:s", 1, "CT1"),
+            ])
+            .unwrap();
+
+        // Only encrypted events, oldest-first (ratchet order — Gotcha #3).
+        let pending = store.pending_decrypts().unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| p.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["$e1", "$e2"]
+        );
+        assert_eq!(pending[0].ciphertext_b64, "CT1");
+    }
+
+    #[test]
+    fn set_decrypted_caches_plaintext_and_clears_pending() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[encrypted("$e1", "!r:s", 1, "CT1")])
+            .unwrap();
+
+        // Before: pending, no cached plaintext in the timeline read.
+        assert_eq!(store.pending_decrypts().unwrap().len(), 1);
+        assert_eq!(store.timeline("!r:s", 10, None).unwrap()[0].decrypted, None);
+
+        store.set_decrypted("$e1", "hello").unwrap();
+
+        // After: plaintext cached, no longer pending (never re-decrypt — Gotcha #3).
+        assert!(store.pending_decrypts().unwrap().is_empty());
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl[0].decrypted.as_deref(), Some("hello"));
+        assert!(!tl[0].decrypt_failed);
+    }
+
+    #[test]
+    fn set_decrypt_failed_marks_terminal_and_clears_pending() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[encrypted("$e1", "!r:s", 1, "CT1")])
+            .unwrap();
+        store.set_decrypt_failed("$e1").unwrap();
+
+        assert!(store.pending_decrypts().unwrap().is_empty());
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl[0].decrypted, None);
+        assert!(tl[0].decrypt_failed);
+    }
+
+    #[test]
+    fn decrypt_cache_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!("pigeon-dec-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dec.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .apply_events(&[encrypted("$e1", "!r:s", 1, "CT1")])
+                .unwrap();
+            store.set_decrypted("$e1", "persisted plaintext").unwrap();
+        }
+        {
+            // Reopen: the v3 migration is a no-op and the cached plaintext survives
+            // (so we never need to re-decrypt after the ratchet moved — Gotcha #3).
+            let store = Store::open(&path).unwrap();
+            let tl = store.timeline("!r:s", 10, None).unwrap();
+            assert_eq!(tl[0].decrypted.as_deref(), Some("persisted plaintext"));
+            assert!(store.pending_decrypts().unwrap().is_empty());
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

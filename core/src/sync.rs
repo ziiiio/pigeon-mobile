@@ -70,14 +70,19 @@ impl PigeonClient {
                     let applied = apply_sync(self, &resp)?;
                     // Process inbound to-device messages — notably MLS Welcomes
                     // that add us to encrypted groups (M3.3). Idempotent on
-                    // at-least-once delivery (Gotcha #8).
+                    // at-least-once delivery (Gotcha #8). Do this BEFORE decrypt
+                    // so a Welcome and the first message in the same batch work.
                     let joined = apply_to_device(self, &resp);
+                    // Decrypt any newly-arrived encrypted events and cache their
+                    // plaintext (M3.5) before signalling — so the UI re-reads
+                    // plaintext, not pending ciphertext.
+                    let decrypted = self.decrypt_pending()?;
                     // We're online — a good moment to (re)transmit queued sends
-                    // (offline-first retry, M2.5). Either can change the store.
+                    // (offline-first retry, M2.5). Any of these can change the store.
                     let flushed = self.flush_pending().await?;
                     backoff = BACKOFF_START;
                     observer.on_status(true);
-                    if applied || flushed || joined {
+                    if applied || joined || decrypted || flushed {
                         observer.on_change();
                     }
                 }

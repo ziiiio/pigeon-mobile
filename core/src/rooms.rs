@@ -75,19 +75,30 @@ pub struct TimelineEvent {
 
 impl From<StoredEvent> for TimelineEvent {
     fn from(ev: StoredEvent) -> Self {
-        let body = if ev.event_type == "p.room.message" {
-            ev.content
+        let body = match ev.event_type.as_str() {
+            "p.room.message" => ev
+                .content
                 .get("body")
                 .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        } else {
-            None
+                .map(str::to_owned),
+            // An encrypted event renders as a normal message once decrypted; its
+            // plaintext is cached in the store (M3.5, Gotcha #3). Our own sent
+            // encrypted messages appear via the plaintext local echo instead
+            // (the authoritative ciphertext event dedups by event_id).
+            "p.room.encrypted" => ev.decrypted.clone(),
+            _ => None,
         };
-        // Only render a system line when there's no message body to show.
-        let system_text = if body.is_none() {
-            render_system(&ev)
-        } else {
+        // With no body to show: a decryption failure gets an explicit placeholder;
+        // an encrypted event still pending decryption stays hidden (the sync loop
+        // decrypts before signalling a change, so this is only briefly hit); any
+        // other event renders its state/membership system line.
+        let system_text = if body.is_some() {
             None
+        } else if ev.event_type == "p.room.encrypted" {
+            ev.decrypt_failed
+                .then(|| "\u{26a0} Unable to decrypt this message".to_owned())
+        } else {
+            render_system(&ev)
         };
         TimelineEvent {
             event_id: ev.event_id,
@@ -251,7 +262,11 @@ impl PigeonClient {
     pub async fn fetch_messages(&self, room_id: String, limit: u32) -> Result<u32, CoreError> {
         let resp = self.api.messages(&room_id, limit).await?;
         let chunk: Vec<serde_json::Value> = resp["chunk"].as_array().cloned().unwrap_or_default();
-        Ok(self.store.apply_events(&chunk)? as u32)
+        let inserted = self.store.apply_events(&chunk)?;
+        // Decrypt any encrypted events this backfill just stored (M3.5), so the
+        // opened timeline shows plaintext rather than pending ciphertext.
+        self.decrypt_pending()?;
+        Ok(inserted as u32)
     }
 
     /// Send a plaintext message (M2.5). Offline-first with **local echo**: the
@@ -278,10 +293,35 @@ impl PigeonClient {
     pub async fn flush_pending(&self) -> Result<bool, CoreError> {
         let mut changed = false;
         for send in self.store.pending_sends()? {
-            let content = serde_json::json!({ "body": send.body, "msgtype": "p.text" });
+            // Encrypt for a room whose MLS group we hold (M3.5): the message goes
+            // out as `p.room.encrypted` ciphertext; the server only ever sees the
+            // ciphertext. Plaintext rooms send `p.room.message`. This is
+            // transparent — the caller (send_message) doesn't branch on it.
+            let (event_type, content) = match self.encrypt_for_send(&send.room_id, &send.body) {
+                Ok(Some(ciphertext)) => (
+                    "p.room.encrypted",
+                    serde_json::json!({ "algorithm": "p.mls.1", "ciphertext": ciphertext }),
+                ),
+                Ok(None) => (
+                    "p.room.message",
+                    serde_json::json!({ "body": send.body, "msgtype": "p.text" }),
+                ),
+                // Encryption failed (shouldn't happen if we hold the group): fail
+                // this send terminally so it doesn't wedge the queue, and move on.
+                Err(err) => {
+                    crate::emit(
+                        crate::LogLevel::Warn,
+                        "e2ee",
+                        &format!("could not encrypt outbound message; marking failed: {err}"),
+                    );
+                    self.store.fail_send(&send.txn_id)?;
+                    changed = true;
+                    continue;
+                }
+            };
             match self
                 .api
-                .send_message(&send.room_id, &send.txn_id, &content)
+                .send_event(&send.room_id, event_type, &send.txn_id, &content)
                 .await
             {
                 Ok(event_id) => {
@@ -294,6 +334,59 @@ impl PigeonClient {
                 // user sees it didn't send, and continue with the others.
                 Err(_) => {
                     self.store.fail_send(&send.txn_id)?;
+                    changed = true;
+                }
+            }
+        }
+        Ok(changed)
+    }
+}
+
+impl PigeonClient {
+    /// If `room_id` is an encrypted room we hold the group for, encrypt `body` and
+    /// return the base64 ciphertext; `None` for a plaintext room. Used by
+    /// [`flush_pending`](PigeonClient::flush_pending) on the send path (M3.5).
+    fn encrypt_for_send(&self, room_id: &str, body: &str) -> Result<Option<String>, CoreError> {
+        let Some(e2ee) = self.e2ee.as_ref() else {
+            return Ok(None);
+        };
+        if e2ee.has_group(room_id)? {
+            Ok(Some(e2ee.encrypt(room_id, body)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Decrypt every not-yet-decrypted `p.room.encrypted` event in the store and
+    /// cache its plaintext (M3.5). Decryption advances the MLS ratchet and is
+    /// order-sensitive, so events are processed in DAG order and exactly once
+    /// (Gotcha #3). A message for a room whose group we don't hold *yet* is left
+    /// pending (its Welcome may arrive on a later sync); a genuine decrypt failure
+    /// (tampered / wrong epoch / not a member) is marked terminally undecryptable.
+    /// Returns whether anything changed (so the caller can refresh). Never logs
+    /// plaintext or key material (Gotcha #2).
+    pub(crate) fn decrypt_pending(&self) -> Result<bool, CoreError> {
+        let Some(e2ee) = self.e2ee.as_ref() else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for pending in self.store.pending_decrypts()? {
+            // No group yet — leave it pending; a Welcome may still arrive.
+            if !e2ee.has_group(&pending.room_id)? {
+                continue;
+            }
+            match e2ee.decrypt(&pending.room_id, &pending.ciphertext_b64) {
+                Ok(plaintext) => {
+                    self.store.set_decrypted(&pending.event_id, &plaintext)?;
+                    changed = true;
+                }
+                Err(err) => {
+                    crate::emit(
+                        crate::LogLevel::Warn,
+                        "e2ee",
+                        &format!("failed to decrypt {}: {err}", pending.event_id),
+                    );
+                    self.store.set_decrypt_failed(&pending.event_id)?;
                     changed = true;
                 }
             }
@@ -356,6 +449,8 @@ mod tests {
             content: content.clone(),
             payload: content,
             send_state: SendState::Confirmed,
+            decrypted: None,
+            decrypt_failed: false,
         }
     }
 
@@ -414,5 +509,157 @@ mod tests {
         let ev = TimelineEvent::from(stored("p.room.power_levels", Some(""), json!({})));
         assert_eq!(ev.body, None);
         assert_eq!(ev.system_text, None);
+    }
+
+    // --- Encrypted event rendering (M3.5) ------------------------------------
+
+    #[test]
+    fn encrypted_event_renders_decrypted_plaintext_as_a_message() {
+        let mut ev = stored(
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": "CT" }),
+        );
+        ev.decrypted = Some("the secret".to_owned());
+        let te = TimelineEvent::from(ev);
+        assert_eq!(te.body.as_deref(), Some("the secret"));
+        assert_eq!(te.system_text, None);
+    }
+
+    #[test]
+    fn encrypted_event_pending_decrypt_is_hidden() {
+        // Not yet decrypted (transient — the sync loop decrypts before signalling):
+        // no body, no placeholder, so it doesn't flicker.
+        let ev = stored(
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": "CT" }),
+        );
+        let te = TimelineEvent::from(ev);
+        assert_eq!(te.body, None);
+        assert_eq!(te.system_text, None);
+    }
+
+    #[test]
+    fn encrypted_event_decrypt_failure_shows_placeholder() {
+        let mut ev = stored(
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": "CT" }),
+        );
+        ev.decrypt_failed = true;
+        let te = TimelineEvent::from(ev);
+        assert_eq!(te.body, None);
+        assert!(te.system_text.unwrap().contains("Unable to decrypt"));
+    }
+
+    // A full receive path: an encrypted event lands in the store, the decrypt pass
+    // caches its plaintext, and the timeline then renders it. Uses two real MLS
+    // engines (alice sends, bob is the client) through a wiremock-backed login.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decrypt_pending_decrypts_inbound_and_caches_plaintext() {
+        use crate::e2ee::E2ee;
+
+        let bob = login_client().await;
+        let alice = E2ee::create("@alice:s").unwrap();
+        let bob_kp = bob
+            .e2ee
+            .as_ref()
+            .unwrap()
+            .key_packages(1)
+            .unwrap()
+            .remove(0);
+        alice.create_group("!enc:s").unwrap();
+        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap();
+        bob.e2ee
+            .as_ref()
+            .unwrap()
+            .join_from_welcome(&welcome)
+            .unwrap();
+
+        // Alice encrypts a message; it arrives in bob's store as p.room.encrypted.
+        let ct = alice.encrypt("!enc:s", "secret hi").unwrap();
+        bob.store
+            .apply_events(&[json!({
+                "event_id": "$e1", "room_id": "!enc:s", "sender": "@alice:s",
+                "type": "p.room.encrypted", "origin_server_ts": 100, "depth": 1,
+                "content": { "algorithm": "p.mls.1", "ciphertext": ct }
+            })])
+            .unwrap();
+
+        // Before decrypt: hidden (pending). After: renders the plaintext body.
+        assert_eq!(
+            bob.timeline("!enc:s".into(), 10, None).unwrap()[0].body,
+            None
+        );
+        assert!(bob.decrypt_pending().unwrap());
+        let tl = bob.timeline("!enc:s".into(), 10, None).unwrap();
+        assert_eq!(tl[0].body.as_deref(), Some("secret hi"));
+        // Idempotent: the ratchet already advanced, so no re-decrypt (Gotcha #3).
+        assert!(!bob.decrypt_pending().unwrap());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decrypt_pending_marks_undecryptable_events_failed() {
+        use crate::e2ee::E2ee;
+
+        // Bob holds a group but is fed a ciphertext he can't decrypt (garbage).
+        let bob = login_client().await;
+        let alice = E2ee::create("@alice:s").unwrap();
+        let bob_kp = bob
+            .e2ee
+            .as_ref()
+            .unwrap()
+            .key_packages(1)
+            .unwrap()
+            .remove(0);
+        alice.create_group("!enc:s").unwrap();
+        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap();
+        bob.e2ee
+            .as_ref()
+            .unwrap()
+            .join_from_welcome(&welcome)
+            .unwrap();
+
+        bob.store
+            .apply_events(&[json!({
+                "event_id": "$bad", "room_id": "!enc:s", "sender": "@alice:s",
+                "type": "p.room.encrypted", "origin_server_ts": 100, "depth": 1,
+                "content": { "algorithm": "p.mls.1", "ciphertext": "AAAA" }
+            })])
+            .unwrap();
+
+        assert!(bob.decrypt_pending().unwrap());
+        let tl = bob.timeline("!enc:s".into(), 10, None).unwrap();
+        assert_eq!(tl[0].body, None);
+        // Rendered as the unable-to-decrypt placeholder (terminal failure).
+        assert!(tl[0]
+            .system_text
+            .as_deref()
+            .unwrap()
+            .contains("Unable to decrypt"));
+    }
+
+    /// Build a logged-in client via a wiremock server that only backs `/login`.
+    /// (Login also mints the client's MLS engine; no key store is installed here,
+    /// so its persistence is a harmless no-op.)
+    async fn login_client() -> std::sync::Arc<PigeonClient> {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@bob:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(&server)
+            .await;
+        // These tests drive the store/engine directly and make no HTTP calls after
+        // login, so it's fine for the mock server to drop when this returns.
+        crate::session::login(server.uri(), "bob".into(), "p".into())
+            .await
+            .unwrap()
     }
 }
