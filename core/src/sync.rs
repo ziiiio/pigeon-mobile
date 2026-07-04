@@ -68,12 +68,16 @@ impl PigeonClient {
             {
                 Ok(resp) => {
                     let applied = apply_sync(self, &resp)?;
+                    // Process inbound to-device messages — notably MLS Welcomes
+                    // that add us to encrypted groups (M3.3). Idempotent on
+                    // at-least-once delivery (Gotcha #8).
+                    let joined = apply_to_device(self, &resp);
                     // We're online — a good moment to (re)transmit queued sends
                     // (offline-first retry, M2.5). Either can change the store.
                     let flushed = self.flush_pending().await?;
                     backoff = BACKOFF_START;
                     observer.on_status(true);
-                    if applied || flushed {
+                    if applied || flushed || joined {
                         observer.on_change();
                     }
                 }
@@ -121,6 +125,68 @@ fn apply_sync(client: &PigeonClient, resp: &Value) -> Result<bool, CoreError> {
         client.store.save_sync_token(next)?;
     }
     Ok(inserted > 0)
+}
+
+/// Process the `to_device.events` block of a `/sync` response (M3.3): join any
+/// MLS group we've been invited to via a `p.mls.welcome`. Returns whether a new
+/// group was joined (so the caller can refresh — a newly-joined room's ciphertext
+/// becomes decryptable). **Never fatal** — a bad/duplicate Welcome is logged and
+/// skipped so it can't wedge the sync loop; and it is **idempotent** on
+/// at-least-once delivery (Gotcha #8) by skipping a Welcome for a room whose group
+/// we already hold. Never logs key material (Gotcha #2).
+fn apply_to_device(client: &PigeonClient, resp: &Value) -> bool {
+    let Some(events) = resp["to_device"]["events"].as_array() else {
+        return false;
+    };
+    let Some(e2ee) = client.e2ee.as_ref() else {
+        return false; // E2EE unavailable this session — nothing to process.
+    };
+
+    let mut joined = false;
+    for ev in events {
+        if ev["type"] != "p.mls.welcome" {
+            continue;
+        }
+        let Some(welcome_b64) = ev["content"]["welcome"].as_str() else {
+            continue;
+        };
+        // The Welcome carries its room id out-of-band, letting us dedup
+        // at-least-once redeliveries: if we already hold the group, skip.
+        let room_id = ev["content"]["room_id"].as_str();
+        if let Some(room) = room_id {
+            match e2ee.has_group(room) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) => {
+                    crate::emit(
+                        LogLevel::Warn,
+                        "e2ee",
+                        &format!("could not check group membership for {room}: {err}"),
+                    );
+                    continue;
+                }
+            }
+        }
+        match e2ee.join_from_welcome(welcome_b64) {
+            Ok(()) => {
+                joined = true;
+                crate::emit(
+                    LogLevel::Info,
+                    "e2ee",
+                    &format!(
+                        "joined encrypted group{}",
+                        room_id.map(|r| format!(" for {r}")).unwrap_or_default()
+                    ),
+                );
+            }
+            Err(err) => crate::emit(
+                LogLevel::Warn,
+                "e2ee",
+                &format!("failed to join from Welcome (skipping): {err}"),
+            ),
+        }
+    }
+    joined
 }
 
 #[cfg(test)]
@@ -218,5 +284,63 @@ mod tests {
             client.store.load_sync_token().unwrap().as_deref(),
             Some("7_2")
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn to_device_welcome_joins_group_and_is_idempotent() {
+        use crate::e2ee::E2ee;
+
+        // `bob` is the syncing client (login gave it its own MLS engine). `alice`
+        // hosts the group and adds bob from a KeyPackage he publishes.
+        let bob = client().await;
+        let alice = E2ee::create("@alice:s").unwrap();
+        let bob_kp = bob
+            .e2ee
+            .as_ref()
+            .unwrap()
+            .key_packages(1)
+            .unwrap()
+            .remove(0);
+        alice.create_group("!enc:s").unwrap();
+        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap();
+
+        // A /sync carrying the Welcome as a to-device event.
+        let resp = json!({
+            "next_batch": "1_1",
+            "rooms": { "join": {} },
+            "to_device": { "events": [
+                { "sender": "@alice:s", "type": "p.mls.welcome",
+                  "content": { "welcome": welcome, "room_id": "!enc:s" } }
+            ] }
+        });
+
+        assert!(!bob.e2ee.as_ref().unwrap().has_group("!enc:s").unwrap());
+        assert!(apply_to_device(&bob, &resp), "bob joined the group");
+        assert!(bob.e2ee.as_ref().unwrap().has_group("!enc:s").unwrap());
+
+        // Re-delivered Welcome (at-least-once): skipped, no re-join (Gotcha #8).
+        assert!(
+            !apply_to_device(&bob, &resp),
+            "duplicate Welcome is idempotent"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn to_device_ignores_non_welcome_and_bad_welcomes() {
+        let bob = client().await;
+        // A non-Welcome to-device event and a malformed Welcome must not join or
+        // wedge the loop — both are skipped, no change.
+        let resp = json!({
+            "next_batch": "1_1",
+            "to_device": { "events": [
+                { "sender": "@x:s", "type": "p.other", "content": {} },
+                { "sender": "@x:s", "type": "p.mls.welcome",
+                  "content": { "welcome": "!!not base64!!", "room_id": "!enc:s" } }
+            ] }
+        });
+        assert!(!apply_to_device(&bob, &resp));
+        assert!(!bob.e2ee.as_ref().unwrap().has_group("!enc:s").unwrap());
     }
 }

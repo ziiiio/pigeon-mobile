@@ -110,6 +110,58 @@ impl E2ee {
         persist(&device)?;
         Ok(packages.iter().map(|kp| STANDARD.encode(kp)).collect())
     }
+
+    /// Whether this device holds the MLS group for `room_id` — i.e. the room is
+    /// encrypted *and we're a member*. The group id is the room id's bytes.
+    pub fn has_group(&self, room_id: &str) -> Result<bool, CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        Ok(device.load_group(room_id.as_bytes())?.is_some())
+    }
+
+    /// Create the MLS group for `room_id` (we host it — used when creating an
+    /// encrypted room, M3.4). Persists. The group id is the room id's bytes.
+    pub fn create_group(&self, room_id: &str) -> Result<(), CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        device.create_group(room_id.as_bytes())?;
+        persist(&device)
+    }
+
+    /// Add a member to `room_id`'s group from their base64 KeyPackage (M3.4);
+    /// returns the base64 `Welcome` to deliver over `/sendToDevice`. `add_member`
+    /// self-merges the commit locally (add-mostly groups), so only the Welcome is
+    /// produced. Persists (group state advances).
+    pub fn add_member(&self, room_id: &str, key_package_b64: &str) -> Result<String, CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let mut group =
+            device
+                .load_group(room_id.as_bytes())?
+                .ok_or_else(|| CoreError::Crypto {
+                    reason: format!("no MLS group for {room_id}"),
+                })?;
+        let key_package = decode_wire(key_package_b64, "KeyPackage")?;
+        let welcome = device.add_member(&mut group, &key_package)?;
+        persist(&device)?;
+        Ok(STANDARD.encode(welcome))
+    }
+
+    /// Join a group from a base64 `Welcome` (pulled from a `p.mls.welcome`
+    /// to-device event, M3.3). Persists. Idempotency for at-least-once delivery
+    /// (Gotcha #8) is the caller's job — check [`has_group`](Self::has_group)
+    /// first, since the Welcome carries the room id out-of-band.
+    pub fn join_from_welcome(&self, welcome_b64: &str) -> Result<(), CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let welcome = decode_wire(welcome_b64, "Welcome")?;
+        device.join_from_welcome(&welcome)?;
+        persist(&device)
+    }
+}
+
+/// Decode a base64 wire blob (KeyPackage/Welcome/ciphertext); a bad encoding is a
+/// crypto/protocol fault, not a storage one.
+fn decode_wire(b64: &str, what: &str) -> Result<Vec<u8>, CoreError> {
+    STANDARD.decode(b64).map_err(|e| CoreError::Crypto {
+        reason: format!("{what} is not valid base64: {e}"),
+    })
 }
 
 /// Persist the device's whole state through the host keystore. Best-effort if no
@@ -220,6 +272,43 @@ mod tests {
             Err(CoreError::Storage { .. }) => {}
             Ok(_) => panic!("expected Storage error, got Ok"),
             Err(other) => panic!("expected Storage error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn group_welcome_round_trip_establishes_shared_membership() {
+        set_key_store(Box::new(MemStore::default()));
+        let alice = E2ee::create("@alice:test.example").unwrap();
+        let bob = E2ee::create("@bob:test.example").unwrap();
+
+        // Bob publishes a KeyPackage; Alice hosts the group and adds him.
+        let bob_kp = bob.key_packages(1).unwrap().remove(0);
+        alice.create_group("!room:test.example").unwrap();
+        assert!(alice.has_group("!room:test.example").unwrap());
+        assert!(!bob.has_group("!room:test.example").unwrap());
+
+        let welcome = alice.add_member("!room:test.example", &bob_kp).unwrap();
+        bob.join_from_welcome(&welcome).unwrap();
+
+        // Both now hold the group for the room (group id = room id bytes).
+        assert!(bob.has_group("!room:test.example").unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn join_from_garbage_welcome_fails_cleanly() {
+        set_key_store(Box::new(MemStore::default()));
+        let bob = E2ee::create("@bob:test.example").unwrap();
+        // Not base64.
+        match bob.join_from_welcome("!!!not base64!!!") {
+            Err(CoreError::Crypto { .. }) => {}
+            other => panic!("expected Crypto error, got {other:?}"),
+        }
+        // Valid base64 but not an MLS Welcome.
+        match bob.join_from_welcome(&STANDARD.encode(b"garbage")) {
+            Err(CoreError::Crypto { .. }) => {}
+            other => panic!("expected Crypto error, got {other:?}"),
         }
     }
 
