@@ -434,6 +434,27 @@ async fn send_message_marks_echo_failed_on_server_rejection() {
     assert!(!tl[0].pending);
 }
 
+// --- Invite (M2.6) --------------------------------------------------------
+
+#[tokio::test]
+async fn invite_posts_user_id_to_invite_path() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/rooms/!r:test.example/invite"))
+        .and(body_json(json!({ "user_id": "@bob:test.example" })))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$inv" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .invite("!r:test.example".into(), "@bob:test.example".into())
+        .await
+        .expect("invite ok");
+}
+
 #[tokio::test]
 async fn ffi_login_network_failure_is_typed_network_error() {
     // Nothing is listening on this port → a transport failure, not an HTTP

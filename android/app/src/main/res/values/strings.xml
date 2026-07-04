@@ -30,6 +30,12 @@
     <string name="chat_back">Back</string>
     <string name="chat_empty">No messages yet</string>
 
+    <!-- Invite (M2.6) -->
+    <string name="chat_invite">Invite</string>
+    <string name="chat_invite_title">Invite a user</string>
+    <string name="chat_invite_user">User ID (@user:server)</string>
+    <string name="chat_invite_confirm">Invite</string>
+
     <!-- Composer / send (M2.5) -->
     <string name="chat_message_hint">Message</string>
     <string name="chat_send">Send</string>

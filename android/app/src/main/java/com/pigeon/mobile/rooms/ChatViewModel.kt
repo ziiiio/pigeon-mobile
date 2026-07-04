@@ -103,6 +103,25 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Invite a user to this room (M2.6). The invite is a membership event; it
+     * surfaces in the timeline via the sync loop (rendered as a system line by
+     * the core), so [refresh] afterwards catches it once the store folds it in.
+     * The invitee accepts by joining the room id.
+     */
+    fun invite(userId: String) {
+        val id = userId.trim()
+        if (id.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                client.invite(roomId, id)
+            } catch (e: CoreException) {
+                _state.value = _state.value.copy(error = e.message)
+            }
+            refresh()
+        }
+    }
+
     /** Union two pages by event id and order by the opaque cursor (DAG depth). */
     private fun merge(a: List<TimelineEvent>, b: List<TimelineEvent>): List<TimelineEvent> =
         (a + b).distinctBy { it.eventId }.sortedBy { it.cursor }

@@ -10,11 +10,13 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use pigeon_mobile_core::api::ErrorCode;
 use pigeon_mobile_core::session::{
-    login, register, restore_session, set_key_store, KeyStore, KeyStoreError,
+    login, register, restore_session, set_key_store, KeyStore, KeyStoreError, PigeonClient,
 };
+use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
 use tokio::net::TcpListener;
 
@@ -52,6 +54,127 @@ async fn spawn() -> anyhow::Result<(String, tests_integration::TestServer)> {
             .expect("server task");
     });
     Ok((format!("http://{addr}"), ts))
+}
+
+/// A no-op sync observer. The conversation test polls the store directly rather
+/// than reacting to callbacks, so it only needs the loop to keep running.
+struct NoopObserver;
+impl SyncObserver for NoopObserver {
+    fn on_change(&self) {}
+    fn on_status(&self, _connected: bool) {}
+}
+
+/// Run `client`'s sync loop in the background so its store folds in server state.
+/// Returns the task handle; abort it to cancel the loop (Gotcha #6).
+fn spawn_sync(client: Arc<PigeonClient>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // The loop only returns on a fatal error; the test aborts it when done.
+        let _ = client.run_sync(Box::new(NoopObserver)).await;
+    })
+}
+
+/// Poll `f` until it returns `true` or the timeout elapses. Used to wait for a
+/// message to arrive over `/sync` without racing the long-poll.
+async fn wait_until<F: Fn() -> bool>(label: &str, f: F) {
+    for _ in 0..150 {
+        if f() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("timed out waiting for: {label}");
+}
+
+/// The M2 exit gate: two clients hold a plaintext conversation through a real
+/// homeserver — create + invite + join (membership), then messages flow both
+/// ways over the sync loop. This drives the same FFI the UI does.
+#[tokio::test]
+async fn two_clients_hold_a_plaintext_conversation() -> anyhow::Result<()> {
+    // A shared key store is fine: each client keeps its token in-core, and the
+    // conversation path never calls `restore_session` (which reads the blob).
+    set_key_store(Box::new(MemStore::default()));
+
+    let (base, _ts) = spawn().await?;
+
+    // Two real accounts on the live server.
+    let alice = register(base.clone(), "alice".into(), "hunter2".into()).await?;
+    let bob = register(base.clone(), "bob".into(), "hunter2".into()).await?;
+    let bob_id = bob.session().user_id.clone();
+    assert_eq!(bob_id, "@bob:test.example");
+
+    // Alice creates a plaintext room and invites Bob (M2.6).
+    let room = alice
+        .create_room(Some("general".into()), Some("plaintext chat".into()))
+        .await?;
+    alice.invite(room.clone(), bob_id.clone()).await?;
+
+    // Bob accepts by joining the room id (the server surfaces no invite list).
+    bob.join_room(room.clone()).await?;
+
+    // Both sync loops run in the background, folding server state into each store.
+    let alice_sync = spawn_sync(alice.clone());
+    let bob_sync = spawn_sync(bob.clone());
+
+    // Membership: Bob's store learns about the room once his sync covers it.
+    {
+        let bob = bob.clone();
+        let room = room.clone();
+        wait_until("bob sees the room", || {
+            bob.list_rooms().unwrap().iter().any(|r| r.room_id == room)
+        })
+        .await;
+    }
+
+    // Alice sends; Bob receives it over sync.
+    alice
+        .send_message(room.clone(), "hello bob".into())
+        .await?;
+    {
+        let bob = bob.clone();
+        let room = room.clone();
+        wait_until("bob receives alice's message", || {
+            bob.timeline(room.clone(), 100, None)
+                .unwrap()
+                .iter()
+                .any(|e| e.body.as_deref() == Some("hello bob"))
+        })
+        .await;
+    }
+
+    // Bob replies; Alice receives it — a full round-trip conversation.
+    bob.send_message(room.clone(), "hi alice".into()).await?;
+    {
+        let alice = alice.clone();
+        let room = room.clone();
+        wait_until("alice receives bob's reply", || {
+            alice
+                .timeline(room.clone(), 100, None)
+                .unwrap()
+                .iter()
+                .any(|e| e.body.as_deref() == Some("hi alice"))
+        })
+        .await;
+    }
+
+    // Membership is visible in the timeline: Bob's join renders as a system line
+    // (the core pre-renders it — no protocol parsing in the UI, Gotcha #9).
+    let alice_tl = alice.timeline(room.clone(), 100, None)?;
+    assert!(
+        alice_tl
+            .iter()
+            .any(|e| e.system_text.as_deref() == Some("@bob:test.example joined")),
+        "alice's timeline shows bob's join as a system line; got: {:?}",
+        alice_tl
+            .iter()
+            .map(|e| (&e.body, &e.system_text))
+            .collect::<Vec<_>>()
+    );
+
+    // Cancel both loops — drops the in-flight `/sync` (Gotcha #6).
+    alice_sync.abort();
+    bob_sync.abort();
+
+    Ok(())
 }
 
 #[tokio::test]

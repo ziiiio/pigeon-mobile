@@ -184,8 +184,20 @@ impl PigeonClient {
     }
 
     /// Join a room by id. The membership + timeline arrive on the next sync.
+    /// This is also how an invitee **accepts** an invite (M2.6): they join by the
+    /// room's id. (The server exposes no invite list in `/sync`, so a pending
+    /// invite is learned out-of-band; and there is no client leave/decline
+    /// endpoint yet — declining is blocked server-side, not implemented here.)
     pub async fn join_room(&self, room_id: String) -> Result<(), CoreError> {
         self.api.join_room(&room_id).await?;
+        Ok(())
+    }
+
+    /// Invite `user_id` to `room_id` (M2.6). The invite is a `p.room.member`
+    /// (membership `invite`) event; it renders in the room's timeline via the
+    /// core's system-line rendering, and the invitee accepts by joining the id.
+    pub async fn invite(&self, room_id: String, user_id: String) -> Result<(), CoreError> {
+        self.api.invite(&room_id, &user_id).await?;
         Ok(())
     }
 

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -49,7 +50,7 @@ import uniffi.pigeon_mobile_core.TimelineEvent
  * A room's chat timeline (M2.4). Reads are offline-first from the store; the
  * screen re-reads when the sync loop signals a change ([changes], bumped by the
  * room list's [SyncObserver]). Scrolling to the top pages older history in from
- * the store. The composer (send) arrives in M2.5.
+ * the store; the composer sends (M2.5); the top-bar action invites a user (M2.6).
  */
 @Composable
 fun ChatRoute(
@@ -77,6 +78,7 @@ fun ChatRoute(
         onBack = onBack,
         onLoadOlder = vm::loadOlder,
         onSend = vm::send,
+        onInvite = vm::invite,
     )
 }
 
@@ -89,8 +91,10 @@ fun ChatScreen(
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
     onSend: (String) -> Unit,
+    onInvite: (String) -> Unit,
 ) {
     val listState = rememberLazyListState()
+    var showInvite by rememberSaveable { mutableStateOf(false) }
 
     // Page older when the top of the loaded range scrolls into view.
     val atTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
@@ -109,6 +113,11 @@ fun ChatScreen(
                 title = { Text(title, maxLines = 1) },
                 navigationIcon = {
                     TextButton(onClick = onBack) { Text(stringResource(R.string.chat_back)) }
+                },
+                actions = {
+                    TextButton(onClick = { showInvite = true }) {
+                        Text(stringResource(R.string.chat_invite))
+                    }
                 },
             )
         },
@@ -149,6 +158,44 @@ fun ChatScreen(
             }
         }
     }
+
+    if (showInvite) {
+        InviteDialog(
+            onDismiss = { showInvite = false },
+            onInvite = { userId ->
+                onInvite(userId)
+                showInvite = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun InviteDialog(onDismiss: () -> Unit, onInvite: (String) -> Unit) {
+    var userId by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.chat_invite_title)) },
+        text = {
+            OutlinedTextField(
+                value = userId,
+                onValueChange = { userId = it },
+                label = { Text(stringResource(R.string.chat_invite_user)) },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onInvite(userId) },
+                enabled = userId.isNotBlank(),
+            ) {
+                Text(stringResource(R.string.chat_invite_confirm))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.rooms_cancel)) }
+        },
+    )
 }
 
 @Composable
