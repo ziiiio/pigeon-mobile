@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.pigeon_mobile_core.CoreException
+import uniffi.pigeon_mobile_core.ImageContent
 import uniffi.pigeon_mobile_core.PigeonClient
 import uniffi.pigeon_mobile_core.TimelineEvent
 
@@ -121,6 +122,43 @@ class ChatViewModel(
             refresh()
         }
     }
+
+    /**
+     * Attach an image (M4.1): upload the bytes, then send a `p.image` message
+     * referencing the resulting media URI. Both steps run in the core (the URI is
+     * a `pigeon://` handle). Plaintext rooms only — the core refuses encrypted
+     * rooms (encrypted media is M4.2). The image appears once the sync loop
+     * delivers it.
+     */
+    fun sendImage(bytes: ByteArray, mimetype: String, width: Int, height: Int) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val uri = client.uploadMedia(bytes, mimetype)
+                    val image = ImageContent(
+                        uri = uri,
+                        mimetype = mimetype,
+                        width = width.toUInt(),
+                        height = height.toUInt(),
+                        size = bytes.size.toULong(),
+                    )
+                    client.sendImage(roomId, image, "")
+                }
+            } catch (e: CoreException) {
+                _state.value = _state.value.copy(error = e.message)
+            }
+            refresh()
+        }
+    }
+
+    /** Download media bytes by `pigeon://` URI for inline rendering (M4.1); `null`
+     * on failure (offline / gone). Off the main thread. */
+    suspend fun downloadMedia(uri: String): ByteArray? =
+        try {
+            withContext(Dispatchers.IO) { client.downloadMedia(uri) }
+        } catch (_: CoreException) {
+            null
+        }
 
     /** Union two pages by event id and order by the opaque cursor (DAG depth). */
     private fun merge(a: List<TimelineEvent>, b: List<TimelineEvent>): List<TimelineEvent> =

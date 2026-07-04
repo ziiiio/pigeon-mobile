@@ -54,4 +54,8 @@
     <string name="chat_send">Send</string>
     <string name="chat_sending">Sending…</string>
     <string name="chat_not_sent">Not sent</string>
+
+    <!-- Media (M4.1) -->
+    <string name="chat_attach">Attach</string>
+    <string name="chat_image_alt">Image</string>
 </resources>

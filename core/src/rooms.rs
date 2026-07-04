@@ -8,9 +8,23 @@
 //! [`crate::sync::SyncObserver`], so the view-models re-read rather than trusting
 //! a write's return value for state.
 
+use crate::api::ErrorCode;
 use crate::session::PigeonClient;
 use crate::store::{RoomSummary, SendState, StoredEvent};
 use crate::CoreError;
+
+/// An image attachment referenced by a timeline message (M4.1). The `uri` is a
+/// `pigeon://` content URI the UI resolves via [`PigeonClient::download_media`];
+/// `width`/`height`/`size` are `0` when unknown. The same record is the input to
+/// [`PigeonClient::send_image`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ImageContent {
+    pub uri: String,
+    pub mimetype: String,
+    pub width: u32,
+    pub height: u32,
+    pub size: u64,
+}
 
 /// A room in the room list — folded current state from the store. The FFI record
 /// the UI renders (M2.3). Mirrors [`RoomSummary`]; kept as its own type so the
@@ -71,10 +85,23 @@ pub struct TimelineEvent {
     pub pending: bool,
     /// A local echo whose send failed terminally. The UI marks it "not sent".
     pub failed: bool,
+    /// An image attachment (M4.1), for a `p.image` message — the UI downloads and
+    /// renders it, with `body` as the caption. `None` for non-image events.
+    pub image: Option<ImageContent>,
 }
 
 impl From<StoredEvent> for TimelineEvent {
     fn from(ev: StoredEvent) -> Self {
+        // An image message (`msgtype: p.image`) carries an attachment; `body` is
+        // the caption. Only surfaced for plaintext messages in M4.1 (encrypted
+        // media is M4.2).
+        let image = if ev.event_type == "p.room.message"
+            && ev.content.get("msgtype").and_then(|v| v.as_str()) == Some("p.image")
+        {
+            parse_image(&ev.content)
+        } else {
+            None
+        };
         let body = match ev.event_type.as_str() {
             "p.room.message" => ev
                 .content
@@ -109,8 +136,37 @@ impl From<StoredEvent> for TimelineEvent {
             system_text,
             pending: ev.send_state == SendState::Sending,
             failed: ev.send_state == SendState::Failed,
+            image,
         }
     }
+}
+
+/// Extract an [`ImageContent`] from a `p.image` message's content (`url` +
+/// `info`), or `None` if the `url` is missing. Unknown dims/size default to 0.
+fn parse_image(content: &serde_json::Value) -> Option<ImageContent> {
+    let uri = content.get("url").and_then(|v| v.as_str())?.to_owned();
+    let info = content.get("info");
+    let str_at = |key: &str| {
+        info.and_then(|i| i.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or("application/octet-stream")
+            .to_owned()
+    };
+    let u32_at = |key: &str| {
+        info.and_then(|i| i.get(key))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    };
+    Some(ImageContent {
+        uri,
+        mimetype: str_at("mimetype"),
+        width: u32_at("w"),
+        height: u32_at("h"),
+        size: info
+            .and_then(|i| i.get("size"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    })
 }
 
 /// Render a state/membership event as a human system line, or `None` for the
@@ -214,6 +270,72 @@ impl PigeonClient {
             .await?;
         e2ee.create_group(&room_id)?;
         Ok(room_id)
+    }
+
+    /// Upload raw media bytes (M4.1) and return the `pigeon://` content URI. The
+    /// caller supplies the `content_type` (e.g. `image/jpeg`). Oversize uploads
+    /// are rejected client-side with a typed limit error (the server caps at
+    /// 50 MiB). For encrypted rooms the bytes should be client-encrypted first
+    /// (M4.2); the server stores whatever it's given, opaquely.
+    pub async fn upload_media(
+        &self,
+        bytes: Vec<u8>,
+        content_type: String,
+    ) -> Result<String, CoreError> {
+        if bytes.len() > crate::media::MAX_UPLOAD_BYTES {
+            return Err(CoreError::Api {
+                code: ErrorCode::LimitExceeded,
+                reason: format!(
+                    "file exceeds the {} MiB media upload limit",
+                    crate::media::MAX_UPLOAD_BYTES / (1024 * 1024)
+                ),
+            });
+        }
+        Ok(self.api.upload_media(bytes, &content_type).await?)
+    }
+
+    /// Download media bytes by `pigeon://` content URI (M4.1). Returns the raw
+    /// bytes (the caller decrypts them for encrypted media, M4.2).
+    pub async fn download_media(&self, uri: String) -> Result<Vec<u8>, CoreError> {
+        let (server, media_id) = crate::media::parse_content_uri(&uri)?;
+        Ok(self.api.download_media(&server, &media_id).await?)
+    }
+
+    /// Send an image message (`p.image`) referencing already-uploaded media
+    /// (M4.1). `caption` is optional display text (the message `body`).
+    ///
+    /// **Plaintext rooms only in M4.1:** sending media to an *encrypted* room is
+    /// refused, because the uploaded bytes are not yet client-encrypted — sending
+    /// their URI would leak the image to the server. Encrypted media is M4.2.
+    pub async fn send_image(
+        &self,
+        room_id: String,
+        image: ImageContent,
+        caption: String,
+    ) -> Result<(), CoreError> {
+        if let Some(e2ee) = self.e2ee.as_ref() {
+            if e2ee.has_group(&room_id)? {
+                return Err(CoreError::Crypto {
+                    reason: "sending media to an encrypted room is not supported yet (M4.2)"
+                        .to_owned(),
+                });
+            }
+        }
+        let content = serde_json::json!({
+            "msgtype": "p.image",
+            "body": caption,
+            "url": image.uri,
+            "info": {
+                "mimetype": image.mimetype,
+                "w": image.width,
+                "h": image.height,
+                "size": image.size,
+            },
+        });
+        self.api
+            .send_event(&room_id, "p.room.message", &next_txn_id(), &content)
+            .await?;
+        Ok(())
     }
 
     /// Join a room by id. The membership + timeline arrive on the next sync.
@@ -509,6 +631,39 @@ mod tests {
         let ev = TimelineEvent::from(stored("p.room.power_levels", Some(""), json!({})));
         assert_eq!(ev.body, None);
         assert_eq!(ev.system_text, None);
+    }
+
+    // --- Image messages (M4.1) -----------------------------------------------
+
+    #[test]
+    fn image_message_populates_image_content_and_caption() {
+        let ev = stored(
+            "p.room.message",
+            None,
+            json!({
+                "msgtype": "p.image", "body": "cat.jpg", "url": "pigeon://s/abc",
+                "info": { "mimetype": "image/jpeg", "w": 800, "h": 600, "size": 12345 }
+            }),
+        );
+        let te = TimelineEvent::from(ev);
+        assert_eq!(te.body.as_deref(), Some("cat.jpg")); // caption
+        let img = te.image.expect("an image attachment");
+        assert_eq!(img.uri, "pigeon://s/abc");
+        assert_eq!(img.mimetype, "image/jpeg");
+        assert_eq!(img.width, 800);
+        assert_eq!(img.height, 600);
+        assert_eq!(img.size, 12345);
+    }
+
+    #[test]
+    fn plain_text_message_has_no_image() {
+        let te = TimelineEvent::from(stored(
+            "p.room.message",
+            None,
+            json!({ "body": "hi", "msgtype": "p.text" }),
+        ));
+        assert!(te.image.is_none());
+        assert_eq!(te.body.as_deref(), Some("hi"));
     }
 
     // --- Encrypted event rendering (M3.5) ------------------------------------

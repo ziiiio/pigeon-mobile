@@ -1,7 +1,14 @@
 package com.pigeon.mobile.rooms
 
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,15 +35,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -81,6 +92,8 @@ fun ChatRoute(
         onLoadOlder = vm::loadOlder,
         onSend = vm::send,
         onInvite = vm::invite,
+        onSendImage = vm::sendImage,
+        download = vm::downloadMedia,
     )
 }
 
@@ -95,9 +108,31 @@ fun ChatScreen(
     onLoadOlder: () -> Unit,
     onSend: (String) -> Unit,
     onInvite: (String) -> Unit,
+    onSendImage: (ByteArray, String, Int, Int) -> Unit,
+    download: suspend (String) -> ByteArray?,
 ) {
     val listState = rememberLazyListState()
     var showInvite by rememberSaveable { mutableStateOf(false) }
+    // A tapped image, shown full-screen (M4.1).
+    var viewImage by remember { mutableStateOf<String?>(null) }
+
+    // Image picker (plaintext rooms only in M4.1). Reads the picked bytes, decodes
+    // its dimensions, and hands them to the core to upload + send.
+    val context = LocalContext.current
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            val resolver = context.contentResolver
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes != null) {
+                val mimetype = resolver.getType(uri) ?: "image/*"
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                onSendImage(bytes, mimetype, bounds.outWidth.coerceAtLeast(0), bounds.outHeight.coerceAtLeast(0))
+            }
+        }
+    }
 
     // Page older when the top of the loaded range scrolls into view.
     val atTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
@@ -134,7 +169,18 @@ fun ChatScreen(
                 },
             )
         },
-        bottomBar = { Composer(onSend = onSend) },
+        bottomBar = {
+            Composer(
+                onSend = onSend,
+                // Media attach is offered only in plaintext rooms in M4.1
+                // (encrypted media is M4.2); the core would refuse it otherwise.
+                onAttach = if (encrypted) {
+                    null
+                } else {
+                    { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                },
+            )
+        },
     ) { padding ->
         Box(
             modifier = Modifier
@@ -155,7 +201,12 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     items(state.events, key = { it.eventId }) { event ->
-                        TimelineRow(event, mine = event.sender == myUserId)
+                        TimelineRow(
+                            event = event,
+                            mine = event.sender == myUserId,
+                            download = download,
+                            onImageClick = { viewImage = it },
+                        )
                     }
                 }
             }
@@ -180,6 +231,9 @@ fun ChatScreen(
                 showInvite = false
             },
         )
+    }
+    viewImage?.let { uri ->
+        FullScreenImage(uri = uri, download = download, onDismiss = { viewImage = null })
     }
 }
 
@@ -212,10 +266,45 @@ private fun InviteDialog(onDismiss: () -> Unit, onInvite: (String) -> Unit) {
 }
 
 @Composable
-private fun TimelineRow(event: TimelineEvent, mine: Boolean) {
+private fun TimelineRow(
+    event: TimelineEvent,
+    mine: Boolean,
+    download: suspend (String) -> ByteArray?,
+    onImageClick: (String) -> Unit,
+) {
     val body = event.body
     val systemText = event.systemText
+    val image = event.image
     when {
+        // An image message (M4.1) → an inline thumbnail (+ optional caption).
+        image != null -> Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+        ) {
+            if (!mine) {
+                Text(
+                    text = event.sender,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                )
+            }
+            RemoteImage(
+                uri = image.uri,
+                download = download,
+                modifier = Modifier
+                    .padding(horizontal = 8.dp)
+                    .sizeIn(maxWidth = 240.dp, maxHeight = 240.dp)
+                    .clickable { onImageClick(image.uri) },
+            )
+            if (!body.isNullOrBlank()) {
+                Text(
+                    text = body,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                )
+            }
+        }
         // A text message → a bubble aligned by sender.
         body != null -> Column(
             modifier = Modifier.fillMaxWidth(),
@@ -279,7 +368,7 @@ private fun TimelineRow(event: TimelineEvent, mine: Boolean) {
 }
 
 @Composable
-private fun Composer(onSend: (String) -> Unit) {
+private fun Composer(onSend: (String) -> Unit, onAttach: (() -> Unit)?) {
     var text by rememberSaveable { mutableStateOf("") }
     Column {
         HorizontalDivider()
@@ -291,6 +380,10 @@ private fun Composer(onSend: (String) -> Unit) {
                 .padding(8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
+            // Attach an image (plaintext rooms only in M4.1).
+            onAttach?.let {
+                TextButton(onClick = it) { Text(stringResource(R.string.chat_attach)) }
+            }
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
@@ -309,6 +402,55 @@ private fun Composer(onSend: (String) -> Unit) {
             ) {
                 Text(stringResource(R.string.chat_send))
             }
+        }
+    }
+}
+
+/** Download media bytes for `uri` off the main thread, decode, and render. Shows
+ * a spinner while loading and a placeholder if it can't be decoded (M4.1). */
+@Composable
+private fun RemoteImage(
+    uri: String,
+    download: suspend (String) -> ByteArray?,
+    modifier: Modifier = Modifier,
+) {
+    val bytes by produceState<ByteArray?>(initialValue = null, uri) { value = download(uri) }
+    val bitmap = remember(bytes) {
+        bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    when {
+        bitmap != null -> Image(
+            bitmap = bitmap,
+            contentDescription = stringResource(R.string.chat_image_alt),
+            modifier = modifier,
+        )
+        bytes == null -> Box(modifier.padding(24.dp), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        else -> Text(
+            text = stringResource(R.string.chat_image_alt),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier.padding(12.dp),
+        )
+    }
+}
+
+/** Full-screen image viewer, dismissed by tapping anywhere (M4.1). */
+@Composable
+private fun FullScreenImage(
+    uri: String,
+    download: suspend (String) -> ByteArray?,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            RemoteImage(uri = uri, download = download, modifier = Modifier.fillMaxWidth())
         }
     }
 }

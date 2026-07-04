@@ -448,6 +448,49 @@ impl Api {
             .await
     }
 
+    // --- Media (M4.1) --------------------------------------------------------
+    // Raw-body transfers (not JSON): the server stores opaque bytes and echoes
+    // the Content-Type back on download. Encrypted media reuses this path.
+
+    /// `POST /media/v1/upload` — upload raw `bytes` with `content_type`, returning
+    /// the `pigeon://{server}/{media_id}` content URI. The caller should reject
+    /// oversize uploads before calling (the server's cap yields a bare `413`).
+    pub async fn upload_media(
+        &self,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<String, ApiError> {
+        let req = self
+            .req(Method::POST, "/_pigeon/media/v1/upload")
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(bytes);
+        let resp = self.send(req).await?;
+        json_string(&resp, "content_uri")
+    }
+
+    /// `GET /media/v1/download/{server}/{media_id}` — fetch media bytes verbatim.
+    /// Returns the raw body (the caller decrypts it for encrypted media, M4.2).
+    pub async fn download_media(&self, server: &str, media_id: &str) -> Result<Vec<u8>, ApiError> {
+        let path = format!("/_pigeon/media/v1/download/{server}/{media_id}");
+        let resp = self
+            .req(Method::GET, &path)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network {
+                reason: e.to_string(),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            // Error bodies are JSON; a media 404 carries the P_* envelope.
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            return Err(parse_error(status.as_u16(), &body));
+        }
+        let bytes = resp.bytes().await.map_err(|e| ApiError::Network {
+            reason: e.to_string(),
+        })?;
+        Ok(bytes.to_vec())
+    }
+
     /// Send a built request: parse JSON on 2xx, else map the `P_*` error body.
     async fn send(&self, req: RequestBuilder) -> Result<Value, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network {

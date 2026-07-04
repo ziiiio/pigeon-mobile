@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use pigeon_mobile_core::api::{Api, ErrorCode};
 use pigeon_mobile_core::e2ee::E2ee;
+use pigeon_mobile_core::rooms::ImageContent;
 use pigeon_mobile_core::session;
 use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
@@ -723,6 +724,154 @@ async fn restore_backup_errors_when_no_backup_on_server() {
     match client.restore_backup("cmVjb3Zlcnk=".into()).await {
         Err(CoreError::Crypto { .. }) => {}
         other => panic!("expected a Crypto error for a missing backup, got {other:?}"),
+    }
+}
+
+// --- Media upload / download / image messages (M4.1) ----------------------
+
+#[tokio::test]
+async fn upload_media_posts_raw_bytes_and_returns_uri() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/media/v1/upload"))
+        .and(header("content-type", "image/png"))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "content_uri": "pigeon://test.example/mediaABC" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let uri = client
+        .upload_media(b"\x89PNG rawbytes".to_vec(), "image/png".into())
+        .await
+        .expect("upload ok");
+    assert_eq!(uri, "pigeon://test.example/mediaABC");
+
+    // The raw bytes were sent verbatim (not JSON-wrapped).
+    let requests = server.received_requests().await.unwrap();
+    let up = requests
+        .iter()
+        .find(|r| r.url.path() == "/_pigeon/media/v1/upload")
+        .unwrap();
+    assert_eq!(up.body, b"\x89PNG rawbytes");
+}
+
+#[tokio::test]
+async fn download_media_fetches_raw_bytes_by_uri() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/_pigeon/media/v1/download/test.example/mediaABC"))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"\x89PNG rawbytes".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let bytes = client
+        .download_media("pigeon://test.example/mediaABC".into())
+        .await
+        .expect("download ok");
+    assert_eq!(bytes, b"\x89PNG rawbytes");
+}
+
+#[tokio::test]
+async fn download_media_rejects_a_malformed_uri() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    match client.download_media("https://not-pigeon/x".into()).await {
+        Err(CoreError::Protocol { .. }) => {}
+        other => panic!("expected a Protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn send_image_posts_a_p_image_message() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_pigeon/client/v1/rooms/!r:test\.example/send/p\.room\.message/.+$",
+        ))
+        .and(body_partial_json(json!({
+            "msgtype": "p.image",
+            "body": "cat.jpg",
+            "url": "pigeon://test.example/mediaABC",
+            "info": { "mimetype": "image/png" }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$img" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .send_image(
+            "!r:test.example".into(),
+            ImageContent {
+                uri: "pigeon://test.example/mediaABC".into(),
+                mimetype: "image/png".into(),
+                width: 4,
+                height: 3,
+                size: 99,
+            },
+            "cat.jpg".into(),
+        )
+        .await
+        .expect("send image ok");
+}
+
+#[tokio::test]
+async fn upload_media_rejects_oversize_client_side() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    // One byte over the 50 MiB cap — rejected before any network call.
+    let too_big = vec![0u8; 50 * 1024 * 1024 + 1];
+    match client.upload_media(too_big, "image/png".into()).await {
+        Err(CoreError::Api {
+            code: ErrorCode::LimitExceeded,
+            ..
+        }) => {}
+        other => panic!("expected a LimitExceeded error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn send_image_refuses_encrypted_rooms_in_m4_1() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!enc:test.example" })),
+        )
+        .mount(&server)
+        .await;
+    let room = client
+        .create_encrypted_room(None, None)
+        .await
+        .expect("create encrypted room");
+
+    // Media to an encrypted room is refused (plaintext bytes would leak) — M4.2.
+    match client
+        .send_image(
+            room,
+            ImageContent {
+                uri: "pigeon://test.example/x".into(),
+                mimetype: "image/png".into(),
+                width: 1,
+                height: 1,
+                size: 1,
+            },
+            "secret.png".into(),
+        )
+        .await
+    {
+        Err(CoreError::Crypto { .. }) => {}
+        other => panic!("expected a Crypto refusal for encrypted-room media, got {other:?}"),
     }
 }
 

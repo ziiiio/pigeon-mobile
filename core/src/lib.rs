@@ -21,6 +21,8 @@ pub mod api;
 pub mod e2ee;
 /// Key-directory orchestration — query/claim peers' KeyPackages (M3.2).
 pub mod keys;
+/// Media: opaque blob upload/download + `pigeon://` URIs (M4.1).
+pub mod media;
 /// Rooms: list, create/join (M2.3), timeline (M2.4), send (M2.5).
 pub mod rooms;
 /// Session lifecycle — register/login and the logged-in client object (M1.2).
