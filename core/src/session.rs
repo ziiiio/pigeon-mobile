@@ -16,14 +16,20 @@
 //! [`restore_session`] reloads it on launch and validates the token against
 //! `/account/whoami`, while staying usable offline.
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crate::api::{Api, ApiError, AuthResponse, ErrorCode};
+use crate::store::Store;
 use crate::{CoreError, LogLevel};
 
 /// Keystore entry under which the session blob is stored. Versioned so a future
 /// format change can migrate rather than misread an old blob.
 const SESSION_KEY: &str = "pigeon.session.v1";
+
+/// The SQLite file name inside the host's configured data dir (single-account
+/// client — one store per app; multi-account would key this per user).
+const STORE_FILE: &str = "pigeon.sqlite3";
 
 /// The non-secret identity of a logged-in session — safe to hold in native UI
 /// state. The access token is deliberately absent (it stays in the core).
@@ -45,10 +51,14 @@ pub struct Session {
 pub struct PigeonClient {
     // The token-bearing HTTP client for this session. Read by `logout` (M1.5) to
     // revoke the token server-side, and by the authenticated flows that hang off
-    // the client in later phases (sync, M2). The token stays inside — never
-    // returned across the FFI.
-    api: Api,
+    // the client (sync/rooms/send — M2). The token stays inside — never returned
+    // across the FFI. `pub(crate)` so the `sync`/`rooms` modules' `impl`s reach it.
+    pub(crate) api: Api,
     session: Session,
+    /// The local store this session reads from and the sync loop writes into
+    /// (M2). Shared (`Arc`) so a spawned sync task and the UI-facing reads use
+    /// the one connection. Dropped with the client on logout.
+    pub(crate) store: Arc<Store>,
 }
 
 #[uniffi::export]
@@ -115,6 +125,41 @@ impl From<KeyStoreError> for CoreError {
         let KeyStoreError::Backend { reason } = err;
         CoreError::Storage { reason }
     }
+}
+
+// --- The local store location (M2.1/M2.2) -----------------------------------
+//
+// The host tells the core where its app-private data dir is (Android `filesDir`
+// / iOS Application Support) once at startup, like the log sink and key store.
+// The session opens the SQLite store there. Secrets never land here — only
+// rooms/timeline/state (Gotcha #1); the token stays in the keystore.
+
+static STORE_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Set the directory the local store lives in. Call once at startup, before any
+/// session op (register/login/restore) that should persist across restarts.
+#[uniffi::export]
+pub fn set_store_dir(dir: String) {
+    *STORE_DIR.write().expect("store dir lock poisoned") = Some(PathBuf::from(dir));
+}
+
+/// Open the session's local store: a file under the configured data dir, or an
+/// in-memory store when the host hasn't set one (unit tests, or a host that
+/// opted out — non-persistent this run, warned).
+fn open_store() -> Result<Arc<Store>, CoreError> {
+    let dir = STORE_DIR.read().expect("store dir lock poisoned").clone();
+    let store = match dir {
+        Some(dir) => Store::open(&dir.join(STORE_FILE))?,
+        None => {
+            crate::emit(
+                LogLevel::Warn,
+                "session",
+                "no store dir set; using in-memory store (data will not survive restart)",
+            );
+            Store::open_in_memory()?
+        }
+    };
+    Ok(Arc::new(store))
 }
 
 static KEY_STORE: RwLock<Option<Box<dyn KeyStore>>> = RwLock::new(None);
@@ -213,7 +258,12 @@ fn finish_login(
         );
     }
     api.set_token(Some(auth.access_token));
-    Ok(Arc::new(PigeonClient { api, session }))
+    let store = open_store()?;
+    Ok(Arc::new(PigeonClient {
+        api,
+        session,
+        store,
+    }))
 }
 
 /// Register a new account on `server` and return a logged-in client.
@@ -263,7 +313,11 @@ pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
 
     match api.whoami().await {
         // Token accepted — a live session.
-        Ok(_) => Ok(Some(Arc::new(PigeonClient { api, session }))),
+        Ok(_) => Ok(Some(Arc::new(PigeonClient {
+            api,
+            session,
+            store: open_store()?,
+        }))),
         // Token is definitively dead: drop it so we don't loop on a revoked
         // session. `None` reads to the UI as "logged out".
         Err(ApiError::Server {
@@ -281,7 +335,11 @@ pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
                 "session",
                 "restored session without server validation (offline)",
             );
-            Ok(Some(Arc::new(PigeonClient { api, session })))
+            Ok(Some(Arc::new(PigeonClient {
+                api,
+                session,
+                store: open_store()?,
+            })))
         }
         // Any other server/protocol error is unexpected during a token check.
         Err(other) => Err(other.into()),

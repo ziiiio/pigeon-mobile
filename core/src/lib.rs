@@ -21,6 +21,8 @@ pub mod api;
 pub mod session;
 /// Local SQLite persistence — rooms, timeline, membership, sync token (M2.1).
 pub mod store;
+/// The `/sync` long-poll loop + change-stream observer (M2.2).
+pub mod sync;
 
 use api::{ApiError, ErrorCode};
 

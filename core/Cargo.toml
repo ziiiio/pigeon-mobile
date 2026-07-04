@@ -26,8 +26,9 @@ uniffi = { version = "0.28", features = ["cli", "tokio"] }
 thiserror = "1"
 # The async runtime behind the FFI's async functions. `rt-multi-thread` gives
 # UniFFI a runtime to spawn on; reqwest pulls the I/O features it needs.
-# `macros` powers `#[tokio::test]` in the HTTP mock tests.
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `macros` powers `#[tokio::test]` in the HTTP mock tests. `time` backs the sync
+# loop's reconnect backoff (`sleep`) and the long-poll request timeout (M2.2).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
 # Client–Server API HTTP client (M1.1). Versions/features mirror the homeserver's
 # client stack (../../pigeon/Cargo.toml) so the two agree on TLS + JSON behaviour:

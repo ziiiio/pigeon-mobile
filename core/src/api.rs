@@ -231,6 +231,91 @@ impl Api {
         self.get("/_pigeon/client/v1/account/whoami").await
     }
 
+    // --- Sync + rooms (M2) ---------------------------------------------------
+    // Mirror the reference CLI's call sequence
+    // (../../pigeon/clients/cli/src/api.rs). Sync tokens are opaque composites —
+    // passed through verbatim, never parsed (CLAUDE.md Gotcha #5).
+
+    /// `GET /sync` — the long-poll. `since` is the opaque token from a prior
+    /// sync (omit on first sync); `timeout_ms` is how long the server may hold
+    /// the request open waiting for events (0 = return immediately); `limit`
+    /// caps events per room. Returns the raw sync JSON (`next_batch` + `rooms`).
+    ///
+    /// A request timeout is set just above the poll window so a wedged connection
+    /// can't hang the loop forever, while still letting the long-poll run its
+    /// course (the base client has no global request timeout — that's deliberate
+    /// for exactly this call).
+    pub async fn sync(
+        &self,
+        since: Option<&str>,
+        timeout_ms: u64,
+        limit: u32,
+    ) -> Result<Value, ApiError> {
+        let timeout = timeout_ms.to_string();
+        let limit = limit.to_string();
+        let mut query: Vec<(&str, &str)> = vec![("timeout", &timeout), ("limit", &limit)];
+        if let Some(s) = since {
+            query.push(("since", s));
+        }
+        let req = self
+            .req(Method::GET, "/_pigeon/client/v1/sync")
+            .query(&query)
+            .timeout(Duration::from_millis(timeout_ms) + Duration::from_secs(15));
+        self.send(req).await
+    }
+
+    /// `POST /createRoom` → the new room's id. Optional `name`/`topic`; set
+    /// `encryption` to create an E2EE room (unused until M3 — plaintext for M2).
+    pub async fn create_room(
+        &self,
+        name: Option<&str>,
+        topic: Option<&str>,
+        encryption: bool,
+    ) -> Result<String, ApiError> {
+        let mut body = json!({});
+        if let Some(n) = name {
+            body["name"] = json!(n);
+        }
+        if let Some(t) = topic {
+            body["topic"] = json!(t);
+        }
+        if encryption {
+            body["encryption"] = json!(true);
+        }
+        let resp = self.post("/_pigeon/client/v1/createRoom", &body).await?;
+        json_string(&resp, "room_id")
+    }
+
+    /// `POST /rooms/{room_id}/join` → the joined room's id. Body is empty (the
+    /// room id is in the path), mirroring the reference CLI.
+    pub async fn join_room(&self, room_id: &str) -> Result<String, ApiError> {
+        let path = format!("/_pigeon/client/v1/rooms/{room_id}/join");
+        let resp = self.post(&path, &json!({})).await?;
+        json_string(&resp, "room_id")
+    }
+
+    /// `POST /rooms/{room_id}/invite` (`{ user_id }`) → the invite event id.
+    pub async fn invite(&self, room_id: &str, user_id: &str) -> Result<String, ApiError> {
+        let path = format!("/_pigeon/client/v1/rooms/{room_id}/invite");
+        let resp = self.post(&path, &json!({ "user_id": user_id })).await?;
+        json_string(&resp, "event_id")
+    }
+
+    /// `PUT /rooms/{room_id}/send/p.room.message/{txn_id}` → the event id.
+    /// `content` is the raw message content (`{ body, msgtype }`). The server
+    /// ignores `txn_id` (no server-side dedup — CLAUDE.md M2 note), so the client
+    /// dedups its own sends; the id still identifies the attempt in the path.
+    pub async fn send_message(
+        &self,
+        room_id: &str,
+        txn_id: &str,
+        content: &Value,
+    ) -> Result<String, ApiError> {
+        let path = format!("/_pigeon/client/v1/rooms/{room_id}/send/p.room.message/{txn_id}");
+        let resp = self.put(&path, content).await?;
+        json_string(&resp, "event_id")
+    }
+
     /// Send a built request: parse JSON on 2xx, else map the `P_*` error body.
     async fn send(&self, req: RequestBuilder) -> Result<Value, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network {
@@ -277,6 +362,18 @@ fn parse_error(status: u16, body: &Value) -> ApiError {
         code,
         message,
     }
+}
+
+/// Pull a required string field from a 2xx body, or [`ApiError::Malformed`] if
+/// absent — shared by the M2 endpoints that return a single id (`room_id`,
+/// `event_id`).
+fn json_string(body: &Value, key: &str) -> Result<String, ApiError> {
+    body[key]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::Malformed {
+            reason: format!("response missing string field `{key}`"),
+        })
 }
 
 /// Extract the three `AuthResponse` fields from a `register`/`login` 2xx body.
