@@ -28,6 +28,11 @@ use crate::{CoreError, LogLevel};
 /// format change can migrate rather than misread an old blob.
 const SESSION_KEY: &str = "pigeon.session.v1";
 
+/// Reserved key-backup slot for the encrypted MLS device-state blob (M4.3) — the
+/// same `(room_id, session_id)` the reference CLI uses, so backups interoperate.
+const BACKUP_ROOM: &str = "!e2ee-backup";
+const BACKUP_SESSION: &str = "mls-device-state";
+
 /// The SQLite file name inside the host's configured data dir (single-account
 /// client — one store per app; multi-account would key this per user).
 const STORE_FILE: &str = "pigeon.sqlite3";
@@ -76,6 +81,14 @@ impl PigeonClient {
 }
 
 impl PigeonClient {
+    /// The session's MLS engine, or a typed error if E2EE couldn't be set up for
+    /// this session. Crypto-touching flows call this before operating.
+    pub(crate) fn e2ee(&self) -> Result<&E2ee, CoreError> {
+        self.e2ee.as_ref().ok_or_else(|| CoreError::Crypto {
+            reason: "E2EE is not available for this session".to_owned(),
+        })
+    }
+
     /// Publish this device's MLS identity key + a pool of KeyPackages via
     /// `/keys/upload` (M3.1), so peers can claim a package to add us to encrypted
     /// groups. **Best-effort**, exactly as the reference CLI does: a failure
@@ -142,6 +155,40 @@ impl PigeonClient {
         // Wipe the MLS device state too — a new login mints a fresh identity, so
         // the old private keys/groups must not linger in the keystore (Gotcha #1).
         E2ee::clear()?;
+        Ok(())
+    }
+
+    /// Back up this device's encryption keys (M4.3): create an encrypted backup of
+    /// the MLS state and store the opaque blob on the server, returning the
+    /// **recovery key** for the user to save. The recovery key is the only secret
+    /// that can restore the backup and **never leaves the device via the server**
+    /// (the server stores only ciphertext — Gotcha #1). Show it once; if lost, the
+    /// backup is unrecoverable. Errors if E2EE isn't set up for this session.
+    pub async fn backup(&self) -> Result<String, CoreError> {
+        let (recovery_key, blob) = self.e2ee()?.create_backup()?;
+        self.api
+            .put_room_key(BACKUP_ROOM, BACKUP_SESSION, &blob)
+            .await?;
+        Ok(recovery_key)
+    }
+
+    /// Restore this device's encryption keys from the server-side backup (M4.3)
+    /// using the user's `recovery_key`. Fetches the encrypted blob, decrypts it,
+    /// **replaces** this session's freshly-minted identity with the recovered one,
+    /// and re-publishes its keys so peers can reach it. Errors if there's no backup
+    /// on the server or the recovery key is wrong (AEAD decryption fails cleanly).
+    pub async fn restore_backup(&self, recovery_key: String) -> Result<(), CoreError> {
+        let blob = self
+            .api
+            .get_room_key(BACKUP_ROOM, BACKUP_SESSION)
+            .await?
+            .ok_or_else(|| CoreError::Crypto {
+                reason: "no encryption-key backup found on the server".to_owned(),
+            })?;
+        self.e2ee()?.restore_from_backup(&recovery_key, &blob)?;
+        // The recovered identity differs from the fresh login one — re-publish so
+        // peers can claim its KeyPackages for new invites.
+        self.publish_device_keys().await;
         Ok(())
     }
 }

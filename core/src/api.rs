@@ -384,6 +384,42 @@ impl Api {
         self.send(req).await
     }
 
+    // --- Encrypted key backup (M4.3) ----------------------------------------
+    // The server stores an opaque JSON object keyed by (user, room_id, session_id)
+    // and never interprets it. We use the reserved slot the reference CLI uses to
+    // stash the encrypted MLS device-state blob.
+
+    /// `PUT /room_keys/key/{room_id}/{session_id}` — store the opaque encrypted
+    /// backup blob (base64) under `{ "blob": ... }` (M4.3).
+    pub async fn put_room_key(
+        &self,
+        room_id: &str,
+        session_id: &str,
+        blob_b64: &str,
+    ) -> Result<(), ApiError> {
+        let path = format!("/_pigeon/client/v1/room_keys/key/{room_id}/{session_id}");
+        self.put(&path, &json!({ "blob": blob_b64 })).await?;
+        Ok(())
+    }
+
+    /// `GET /room_keys/key/{room_id}/{session_id}` — fetch the stored backup blob
+    /// (base64), or `None` if nothing is backed up (server `404`/`P_NOT_FOUND`).
+    pub async fn get_room_key(
+        &self,
+        room_id: &str,
+        session_id: &str,
+    ) -> Result<Option<String>, ApiError> {
+        let path = format!("/_pigeon/client/v1/room_keys/key/{room_id}/{session_id}");
+        match self.get(&path).await {
+            Ok(resp) => Ok(resp["blob"].as_str().map(str::to_owned)),
+            Err(ApiError::Server {
+                code: ErrorCode::NotFound,
+                ..
+            }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// `PUT /rooms/{room_id}/send/{event_type}/{txn_id}` → the event id. `content`
     /// is the raw event content (`{ body, msgtype }` for `p.room.message`, or
     /// `{ algorithm, ciphertext }` for `p.room.encrypted` — M3.5). The server

@@ -183,6 +183,41 @@ impl E2ee {
     }
 }
 
+impl E2ee {
+    /// Create an encrypted backup of this device's whole MLS state (M4.3), for
+    /// upload to the server's key-backup store. Returns `(recovery_key, blob)`,
+    /// both base64: the **recovery key** is the only restore secret (show it to
+    /// the user to save; it never touches the server), and the **blob** is the
+    /// AEAD-encrypted state to store server-side (opaque — the server can't read
+    /// it, Gotcha #1). Delegates entirely to `pigeon-crypto` (no crypto here).
+    pub fn create_backup(&self) -> Result<(String, String), CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let backup = device.create_backup()?;
+        Ok((
+            STANDARD.encode(&backup.recovery_key),
+            STANDARD.encode(&backup.blob),
+        ))
+    }
+
+    /// Restore this session's device from an encrypted backup (M4.3): decrypt the
+    /// server-fetched `blob` with the user's `recovery_key` and **replace** the
+    /// current in-memory device (a fresh identity minted at login) with the
+    /// recovered one, then persist it. A wrong recovery key fails AEAD decryption
+    /// cleanly. After this, the device holds the backed-up identity + groups.
+    pub fn restore_from_backup(
+        &self,
+        recovery_key_b64: &str,
+        blob_b64: &str,
+    ) -> Result<(), CoreError> {
+        let recovery_key = decode_wire(recovery_key_b64, "recovery key")?;
+        let blob = decode_wire(blob_b64, "backup blob")?;
+        let restored = Device::restore_from_backup(&recovery_key, &blob)?;
+        let mut device = self.device.lock().expect("e2ee mutex poisoned");
+        *device = restored;
+        persist(&device)
+    }
+}
+
 /// Load `room_id`'s MLS group from device storage, or a typed error if we don't
 /// hold it (not an encrypted room we're a member of).
 fn load_group(device: &Device, room_id: &str) -> Result<pigeon_crypto::Group, CoreError> {
@@ -381,6 +416,31 @@ mod tests {
             Err(CoreError::Crypto { .. }) => {}
             other => panic!("expected Crypto error, got {other:?}"),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn backup_restores_groups_and_rejects_wrong_recovery_key() {
+        set_key_store(Box::new(MemStore::default()));
+        let alice = E2ee::create("@alice:test.example").unwrap();
+        alice.create_group("!room:test.example").unwrap();
+        let (recovery_key, blob) = alice.create_backup().unwrap();
+
+        // A fresh device (new identity) restores from the backup and recovers the
+        // group — proving the encrypted blob round-trips the whole MLS state.
+        let restored = E2ee::create("@alice:test.example").unwrap();
+        assert!(!restored.has_group("!room:test.example").unwrap());
+        restored.restore_from_backup(&recovery_key, &blob).unwrap();
+        assert!(restored.has_group("!room:test.example").unwrap());
+
+        // Negative (required for crypto): a wrong recovery key fails cleanly.
+        let other = E2ee::create("@alice:test.example").unwrap();
+        let wrong_key = STANDARD.encode([0u8; 32]);
+        assert!(other.restore_from_backup(&wrong_key, &blob).is_err());
+        // Garbage blob also fails cleanly.
+        assert!(restored
+            .restore_from_backup(&recovery_key, &STANDARD.encode(b"nope"))
+            .is_err());
     }
 
     #[test]

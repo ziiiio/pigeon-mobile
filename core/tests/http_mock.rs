@@ -631,6 +631,101 @@ async fn send_in_encrypted_room_puts_p_room_encrypted_ciphertext() {
     assert_eq!(tl.last().unwrap().body.as_deref(), Some("top secret"));
 }
 
+// --- Encrypted key backup / restore (M4.3) --------------------------------
+
+#[tokio::test]
+async fn backup_puts_blob_and_returns_recovery_key() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+
+    // Give the device a group so the backup has real state to protect.
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/createRoom"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "room_id": "!enc:test.example" })),
+        )
+        .mount(&server)
+        .await;
+    client
+        .create_encrypted_room(None, None)
+        .await
+        .expect("create encrypted room");
+
+    // The backup is stored in the reserved room_keys slot as an opaque blob.
+    Mock::given(method("PUT"))
+        .and(path(
+            "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
+        ))
+        .and(body_partial_json(json!({})))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let recovery_key = client.backup().await.expect("backup ok");
+    assert!(!recovery_key.is_empty(), "a recovery key is returned");
+
+    // The stored body carries a base64 blob, never anything plaintext-identifying.
+    let requests = server.received_requests().await.expect("recorded requests");
+    let put = requests
+        .iter()
+        .find(|r| r.url.path().contains("/room_keys/key/"))
+        .expect("a backup PUT was made");
+    let body: serde_json::Value = serde_json::from_slice(&put.body).unwrap();
+    assert!(body["blob"].as_str().is_some(), "stores a base64 blob");
+}
+
+#[tokio::test]
+async fn restore_backup_fetches_blob_and_recovers_identity() {
+    // Produce a real backup blob from a standalone device, then have a freshly
+    // logged-in client restore from it (the server serves the stored blob).
+    let donor = E2ee::create("@alice:test.example").expect("donor device");
+    donor.create_group("!enc:test.example").expect("group");
+    let (recovery_key, blob) = donor.create_backup().expect("backup");
+
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
+        ))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "blob": blob })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Restoring swaps in the recovered identity + groups (key re-publish is
+    // best-effort — /keys/upload 404s here, which is fine).
+    client
+        .restore_backup(recovery_key)
+        .await
+        .expect("restore ok");
+}
+
+#[tokio::test]
+async fn restore_backup_errors_when_no_backup_on_server() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
+        ))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(
+                json!({ "errcode": "P_NOT_FOUND", "error": "no such backed-up key" }),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    match client.restore_backup("cmVjb3Zlcnk=".into()).await {
+        Err(CoreError::Crypto { .. }) => {}
+        other => panic!("expected a Crypto error for a missing backup, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn ffi_login_network_failure_is_typed_network_error() {
     // Nothing is listening on this port → a transport failure, not an HTTP

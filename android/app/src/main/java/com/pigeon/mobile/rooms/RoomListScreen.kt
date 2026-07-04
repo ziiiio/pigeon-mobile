@@ -21,7 +21,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -115,6 +119,9 @@ fun RoomListRoute(
             onOpenRoom = { openRoom = it },
             onCreateRoom = vm::createRoom,
             onJoinRoom = vm::joinRoom,
+            onBackup = vm::backup,
+            onRestore = vm::restoreBackup,
+            onRecoveryKeyDismiss = vm::clearRecoveryKey,
             onSignOut = onSignOut,
         )
     }
@@ -130,10 +137,15 @@ fun RoomListScreen(
     onOpenRoom: (Room) -> Unit,
     onCreateRoom: (String?, String?, Boolean) -> Unit,
     onJoinRoom: (String) -> Unit,
+    onBackup: () -> Unit,
+    onRestore: (String) -> Unit,
+    onRecoveryKeyDismiss: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var showCreate by rememberSaveable { mutableStateOf(false) }
     var showJoin by rememberSaveable { mutableStateOf(false) }
+    var showMenu by rememberSaveable { mutableStateOf(false) }
+    var showRestore by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -153,6 +165,28 @@ fun RoomListScreen(
                     }
                     TextButton(onClick = onSignOut, enabled = !signingOut) {
                         Text(stringResource(R.string.home_sign_out))
+                    }
+                    // Overflow: encryption-key backup / restore (M4.3).
+                    Box {
+                        TextButton(onClick = { showMenu = true }) {
+                            Text(stringResource(R.string.rooms_menu))
+                        }
+                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.backup_action)) },
+                                onClick = {
+                                    showMenu = false
+                                    onBackup()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.restore_action)) },
+                                onClick = {
+                                    showMenu = false
+                                    showRestore = true
+                                },
+                            )
+                        }
                     }
                 },
             )
@@ -223,6 +257,70 @@ fun RoomListScreen(
             },
         )
     }
+    if (showRestore) {
+        RestoreBackupDialog(
+            onDismiss = { showRestore = false },
+            onRestore = { key ->
+                onRestore(key)
+                showRestore = false
+            },
+        )
+    }
+    // Shown once after a successful backup — the user must save this key.
+    state.recoveryKey?.let { key ->
+        RecoveryKeyDialog(recoveryKey = key, onDismiss = onRecoveryKeyDismiss)
+    }
+}
+
+@Composable
+private fun RecoveryKeyDialog(recoveryKey: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.backup_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(stringResource(R.string.backup_message))
+                SelectionContainer {
+                    Text(
+                        text = recoveryKey,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(12.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.backup_done)) }
+        },
+    )
+}
+
+@Composable
+private fun RestoreBackupDialog(onDismiss: () -> Unit, onRestore: (String) -> Unit) {
+    var key by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.restore_title)) },
+        text = {
+            OutlinedTextField(
+                value = key,
+                onValueChange = { key = it },
+                label = { Text(stringResource(R.string.restore_key_hint)) },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onRestore(key) }, enabled = key.isNotBlank()) {
+                Text(stringResource(R.string.restore_confirm))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.rooms_cancel)) }
+        },
+    )
 }
 
 @Composable

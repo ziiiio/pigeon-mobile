@@ -28,6 +28,17 @@
     <string name="rooms_join_title">Join a room</string>
     <string name="rooms_join_id">Room ID (!room:server)</string>
 
+    <!-- Encryption key backup / restore (M4.3) -->
+    <string name="rooms_menu">More</string>
+    <string name="backup_action">Back up encryption keys</string>
+    <string name="restore_action">Restore from backup</string>
+    <string name="backup_title">Recovery key</string>
+    <string name="backup_message">Save this recovery key somewhere safe. It is the only way to restore your encrypted messages on a new device, and it is never sent to the server. It will not be shown again.</string>
+    <string name="backup_done">Done</string>
+    <string name="restore_title">Restore from backup</string>
+    <string name="restore_key_hint">Recovery key</string>
+    <string name="restore_confirm">Restore</string>
+
     <!-- Chat (M2.4) -->
     <string name="chat_back">Back</string>
     <string name="chat_empty">No messages yet</string>

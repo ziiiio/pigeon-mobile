@@ -21,6 +21,10 @@ data class RoomsState(
     val loading: Boolean = true,
     /** A transient action failure (create/join/reload) to surface then dismiss. */
     val actionError: String? = null,
+    /** After a successful key backup, the recovery key to show the user once
+     * (M4.3). The user must save it — it's the only secret that can restore the
+     * backup, and it never reaches the server. Cleared when the dialog dismisses. */
+    val recoveryKey: String? = null,
 )
 
 /**
@@ -92,6 +96,40 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
     /** The sync loop ended fatally (e.g. the token was revoked). */
     fun onSyncFailed(message: String?) {
         _state.value = _state.value.copy(connected = false, actionError = message)
+    }
+
+    /**
+     * Back up the device's encryption keys (M4.3). On success the returned
+     * recovery key lands in [RoomsState.recoveryKey] for the UI to show once —
+     * it's the only secret that can restore the backup and never reaches the
+     * server. The token never crosses into UI state (Gotcha #1); this is the
+     * recovery key, a distinct user-facing secret the user must save.
+     */
+    fun backup() {
+        viewModelScope.launch {
+            _state.value = try {
+                _state.value.copy(recoveryKey = client.backup())
+            } catch (e: CoreException) {
+                _state.value.copy(actionError = e.message)
+            }
+        }
+    }
+
+    /** Restore the device's encryption keys from the server-side backup using the
+     * user's recovery key (M4.3). Recovered groups/identity surface via sync. */
+    fun restoreBackup(recoveryKey: String) {
+        viewModelScope.launch {
+            try {
+                client.restoreBackup(recoveryKey.trim())
+            } catch (e: CoreException) {
+                _state.value = _state.value.copy(actionError = e.message)
+            }
+        }
+    }
+
+    /** Dismiss the shown recovery key (the user has saved it). */
+    fun clearRecoveryKey() {
+        _state.value = _state.value.copy(recoveryKey = null)
     }
 
     fun clearError() {
