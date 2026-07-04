@@ -39,6 +39,15 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# Local persistence (M2.1): the offline-first store (rooms, timeline, sync token,
+# membership). `bundled` statically compiles SQLite into the cdylib, so the
+# Android/iOS cross-builds carry no system-libsqlite dependency (cargo-ndk stays
+# clean). Sync API — store ops are fast local I/O and stay off the FFI's async
+# path; heavy scans can offload via `spawn_blocking`. (Decision flagged &
+# approved: rusqlite over sqlx — lighter tree, no build-time DB, matches
+# matrix-rust-sdk's SQLite store.)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Reused homeserver crates — the single source of crypto + protocol logic.
 # Path deps into the sibling `pigeon` repo (see ../docs/ARCHITECTURE.md §4.1).
 pigeon-core = { path = "../../pigeon/crates/core" }

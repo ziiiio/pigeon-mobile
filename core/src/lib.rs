@@ -19,6 +19,8 @@ use pigeon_crypto::Device;
 pub mod api;
 /// Session lifecycle — register/login and the logged-in client object (M1.2).
 pub mod session;
+/// Local SQLite persistence — rooms, timeline, membership, sync token (M2.1).
+pub mod store;
 
 use api::{ApiError, ErrorCode};
 

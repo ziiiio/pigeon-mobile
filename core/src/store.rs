@@ -1,0 +1,865 @@
+//! The local persistence store (M2.1) — offline-first SQLite.
+//!
+//! This is the client's on-device source of truth. Reads come from here; the
+//! sync loop (M2.2) reconciles it against the server. It holds four things, the
+//! scope of M2.1:
+//!
+//! - the **timeline event log** — an append-only table keyed by the server's
+//!   content-hash `event_id`, so re-applying a `/sync` batch is idempotent
+//!   (sync is at-least-once by design — CLAUDE.md Gotcha #8);
+//! - **current room state**, folded from the state events in that log
+//!   (`p.room.name`/`topic`/`encryption`/`member`/…), last-writer-wins by DAG
+//!   `depth`. Rooms have no wire object — name/topic/membership are all state
+//!   events we fold ourselves;
+//! - **membership**, which is just the current `p.room.member` state per target
+//!   user (invites/leaves land here in M2.6);
+//! - the **sync token** — the opaque composite `next_batch`, stored verbatim
+//!   (CLAUDE.md Gotcha #5: never parse or synthesise one).
+//!
+//! ## Design notes
+//!
+//! - **Append-friendly.** `events` is insert-only (`INSERT OR IGNORE` on the
+//!   `event_id` primary key). Derived tables (`room_state`) are folded on write;
+//!   nothing is mutated destructively, so a schema addition is a new table/column
+//!   plus a migration, never a rewrite.
+//! - **Ordering.** Timeline order mirrors the server: `depth ASC, event_id ASC`
+//!   (the DAG position; `event.rs` in the server repo). `origin_server_ts` is
+//!   sender wall-clock — untrusted, display-only, never an ordering key.
+//! - **Sync, not async.** rusqlite is blocking, but these ops are fast local
+//!   I/O; they run synchronously off the FFI's async path (a `std::sync::Mutex`
+//!   guards the one connection and is never held across an `.await`). A future
+//!   heavy scan can offload via `tokio::task::spawn_blocking`.
+//! - **No secrets here.** Keys/tokens live in the platform keystore
+//!   ([`crate::session`]), never in this DB in clear (CLAUDE.md Gotcha #1).
+//!
+//! The store is a plain Rust module (no UniFFI surface of its own yet); the sync
+//! loop and the room/timeline FFI records are built on top of it in M2.2–M2.4.
+
+use std::path::Path;
+use std::sync::Mutex;
+
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::Value;
+
+use crate::CoreError;
+
+/// The current schema version. Bumped when a migration is added; see [`migrate`].
+const SCHEMA_VERSION: i64 = 1;
+
+/// A failure from the local store: either the SQLite layer or a wire event that
+/// wasn't the shape the protocol promised. Surfaced across the FFI as
+/// [`CoreError::Storage`] (a corrupt/unreadable local DB is a storage fault).
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// The SQLite layer failed (open, migrate, query, disk).
+    #[error("database error: {0}")]
+    Db(#[from] rusqlite::Error),
+    /// A `/sync` event was missing a field the store requires to index it.
+    #[error("malformed event: {reason}")]
+    Malformed { reason: String },
+}
+
+impl From<StoreError> for CoreError {
+    fn from(err: StoreError) -> Self {
+        CoreError::Storage {
+            reason: err.to_string(),
+        }
+    }
+}
+
+/// A room member's current membership, read from the latest `p.room.member`
+/// state event for a target user. Unknown wire values are preserved verbatim
+/// ([`Membership::Other`]) so a newer server can't make the client panic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Membership {
+    Join,
+    Invite,
+    Leave,
+    Ban,
+    Knock,
+    Other(String),
+}
+
+impl Membership {
+    /// Map a wire `content.membership` string to a typed value.
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "join" => Self::Join,
+            "invite" => Self::Invite,
+            "leave" => Self::Leave,
+            "ban" => Self::Ban,
+            "knock" => Self::Knock,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+/// A stored timeline event, parsed from the wire JSON into the fields the store
+/// indexes on. The full event is retained verbatim in [`StoredEvent::payload`]
+/// so nothing is lost (signatures, DAG edges, unknown fields all survive a
+/// round-trip through the DB).
+#[derive(Debug, Clone)]
+pub struct StoredEvent {
+    /// Server content-hash id (`$…`) — the immutable, globally-unique dedup key.
+    pub event_id: String,
+    pub room_id: String,
+    pub sender: String,
+    /// The `type` field (`p.room.message`, `p.room.member`, …).
+    pub event_type: String,
+    /// Present ⇒ this is a state event; the key is the target (a user id for
+    /// membership, `""` for room-scoped state like name/topic).
+    pub state_key: Option<String>,
+    /// Sender wall-clock millis. **Display-only** — never an ordering key.
+    pub origin_server_ts: i64,
+    /// DAG depth — the timeline ordering authority.
+    pub depth: i64,
+    /// The event `content` (e.g. `{ "body", "msgtype" }` for a message).
+    pub content: Value,
+    /// The whole event JSON, retained losslessly.
+    pub payload: Value,
+}
+
+impl StoredEvent {
+    /// Parse a `/sync` timeline event into a [`StoredEvent`]. Pure — no I/O, so
+    /// it is unit-tested without a database or runtime. A missing required field
+    /// is a protocol mismatch ([`StoreError::Malformed`]), not a DB fault.
+    pub fn from_wire(event: &Value) -> Result<Self, StoreError> {
+        let field = |key: &str| -> Result<String, StoreError> {
+            event[key]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| StoreError::Malformed {
+                    reason: format!("event missing string field `{key}`"),
+                })
+        };
+        // origin_server_ts and depth are `u64` on the wire; they fit comfortably
+        // in the i64 SQLite stores as INTEGER (well under 2^63 for real values).
+        let int = |key: &str| -> Result<i64, StoreError> {
+            event[key].as_i64().ok_or_else(|| StoreError::Malformed {
+                reason: format!("event missing integer field `{key}`"),
+            })
+        };
+        Ok(StoredEvent {
+            event_id: field("event_id")?,
+            room_id: field("room_id")?,
+            sender: field("sender")?,
+            event_type: field("type")?,
+            // `state_key` is omitted on non-state events (server `skip_serializing_if`).
+            state_key: event["state_key"].as_str().map(str::to_owned),
+            origin_server_ts: int("origin_server_ts")?,
+            depth: int("depth")?,
+            content: event.get("content").cloned().unwrap_or(Value::Null),
+            payload: event.clone(),
+        })
+    }
+}
+
+/// A room as it appears in the room list — current-state fields folded from the
+/// event log. Built in M2.1; the FFI-visible record and live updates are M2.3.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomSummary {
+    pub room_id: String,
+    /// From the latest `p.room.name` (`content.name`), if any.
+    pub name: Option<String>,
+    /// From the latest `p.room.topic` (`content.topic`), if any.
+    pub topic: Option<String>,
+    /// True once a `p.room.encryption` state event has been seen (E2EE marker).
+    pub encrypted: bool,
+    /// Most recent `origin_server_ts` in the room — for list ordering. Display
+    /// clock, so approximate, but adequate to sort "most recent first".
+    pub last_activity_ts: i64,
+}
+
+/// The local SQLite store. One per session; cheap to clone the handle by sharing
+/// the `Arc` the session holds. The single connection is guarded by a mutex —
+/// ops are short and synchronous, so it is never held across an `.await`.
+pub struct Store {
+    conn: Mutex<Connection>,
+}
+
+impl Store {
+    /// Open (creating if absent) the store at `path` and bring the schema up to
+    /// date. Used on device with the host's app-private data dir.
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        let conn = Connection::open(path)?;
+        Self::init(conn)
+    }
+
+    /// Open an in-memory store — for host unit tests (no file, no device).
+    pub fn open_in_memory() -> Result<Self, StoreError> {
+        let conn = Connection::open_in_memory()?;
+        Self::init(conn)
+    }
+
+    fn init(conn: Connection) -> Result<Self, StoreError> {
+        // WAL for durability + reader/writer concurrency; enforce FKs so a
+        // dangling state→event reference can't be written.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        migrate(&conn)?;
+        Ok(Store {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("store connection mutex poisoned")
+    }
+
+    // --- Sync token (opaque composite `next_batch`) --------------------------
+
+    /// Persist the sync token verbatim (CLAUDE.md Gotcha #5 — never parse it).
+    /// Single-row table; replaces any previous value.
+    pub fn save_sync_token(&self, token: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO sync_token (id, token) VALUES (0, ?1)
+             ON CONFLICT(id) DO UPDATE SET token = excluded.token",
+            [token],
+        )?;
+        Ok(())
+    }
+
+    /// Load the persisted sync token, or `None` before the first sync completes.
+    pub fn load_sync_token(&self) -> Result<Option<String>, StoreError> {
+        let token = self
+            .lock()
+            .query_row("SELECT token FROM sync_token WHERE id = 0", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?;
+        Ok(token)
+    }
+
+    // --- Writes: append events + fold current state --------------------------
+
+    /// Apply a batch of `/sync` timeline events: append each to the log
+    /// (idempotent on `event_id`) and fold any state event into current state.
+    /// Runs in one transaction, so a batch lands atomically. Returns the count of
+    /// events newly inserted (already-seen events are counted as 0 — re-sync is a
+    /// no-op, Gotcha #8).
+    pub fn apply_events(&self, events: &[Value]) -> Result<usize, StoreError> {
+        // Parse first (pure, fail-fast) so a malformed event aborts the batch
+        // before any partial write.
+        let parsed: Vec<StoredEvent> = events
+            .iter()
+            .map(StoredEvent::from_wire)
+            .collect::<Result<_, _>>()?;
+
+        let mut guard = self.lock();
+        let tx = guard.transaction()?;
+        let mut inserted = 0usize;
+        for ev in &parsed {
+            inserted += insert_event(&tx, ev)?;
+            if ev.state_key.is_some() {
+                fold_state(&tx, ev)?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    // --- Reads ----------------------------------------------------------------
+
+    /// A timeline page for a room, oldest-first (`depth ASC, event_id ASC`,
+    /// mirroring the server). Returns the newest `limit` events when `before` is
+    /// `None`; pass a `depth` as `before` to page backwards (backfill, M2.4).
+    /// Includes every event type — state and membership render inline in the
+    /// timeline (as the reference CLI does), so the UI decides what to show.
+    pub fn timeline(
+        &self,
+        room_id: &str,
+        limit: u32,
+        before: Option<i64>,
+    ) -> Result<Vec<StoredEvent>, StoreError> {
+        let guard = self.lock();
+        // Select the newest `limit` (optionally strictly older than `before`)
+        // descending, then reverse to oldest-first for display.
+        let sql = "SELECT payload FROM events
+                   WHERE room_id = ?1 AND (?2 IS NULL OR depth < ?2)
+                   ORDER BY depth DESC, event_id DESC
+                   LIMIT ?3";
+        let mut stmt = guard.prepare(sql)?;
+        let rows = stmt.query_map(rusqlite::params![room_id, before, limit], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(parse_stored_payload(&row?)?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
+    /// The room list, one entry per known room, most-recent-activity first.
+    /// Name/topic/encryption are folded current state (CLAUDE.md: rooms have no
+    /// wire object). The server only syncs rooms you have joined, so every room
+    /// here is one you're in.
+    pub fn list_rooms(&self) -> Result<Vec<RoomSummary>, StoreError> {
+        let guard = self.lock();
+        // One row per room that has any state, with name/topic pulled from the
+        // current-state event's content and `encrypted` from the presence of a
+        // `p.room.encryption` state event.
+        let sql = "
+            SELECT r.room_id,
+                   (SELECT json_extract(e.payload, '$.content.name')
+                      FROM room_state s JOIN events e ON e.event_id = s.event_id
+                     WHERE s.room_id = r.room_id AND s.type = 'p.room.name' AND s.state_key = ''),
+                   (SELECT json_extract(e.payload, '$.content.topic')
+                      FROM room_state s JOIN events e ON e.event_id = s.event_id
+                     WHERE s.room_id = r.room_id AND s.type = 'p.room.topic' AND s.state_key = ''),
+                   EXISTS(SELECT 1 FROM room_state s
+                           WHERE s.room_id = r.room_id AND s.type = 'p.room.encryption'),
+                   COALESCE((SELECT MAX(origin_server_ts) FROM events e WHERE e.room_id = r.room_id), 0)
+              FROM (SELECT DISTINCT room_id FROM room_state) r
+             ORDER BY 5 DESC, r.room_id ASC";
+        let mut stmt = guard.prepare(sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RoomSummary {
+                room_id: r.get(0)?,
+                name: r.get(1)?,
+                topic: r.get(2)?,
+                encrypted: r.get::<_, i64>(3)? != 0,
+                last_activity_ts: r.get(4)?,
+            })
+        })?;
+        let mut rooms = Vec::new();
+        for row in rows {
+            rooms.push(row?);
+        }
+        Ok(rooms)
+    }
+
+    /// The current membership of `user_id` in `room_id`, from the latest
+    /// `p.room.member` state event for that target — `None` if the user has no
+    /// membership event in the room.
+    pub fn membership(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<Option<Membership>, StoreError> {
+        let ev = self.current_state(room_id, "p.room.member", user_id)?;
+        Ok(ev.and_then(|e| {
+            e.content
+                .get("membership")
+                .and_then(Value::as_str)
+                .map(Membership::from_wire)
+        }))
+    }
+
+    /// The current-state event for `(type, state_key)` in a room, or `None`.
+    /// The generic current-state accessor the folded state answers from.
+    pub fn current_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Option<StoredEvent>, StoreError> {
+        let guard = self.lock();
+        let payload = guard
+            .query_row(
+                "SELECT e.payload FROM room_state s JOIN events e ON e.event_id = s.event_id
+                 WHERE s.room_id = ?1 AND s.type = ?2 AND s.state_key = ?3",
+                rusqlite::params![room_id, event_type, state_key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        match payload {
+            Some(p) => Ok(Some(parse_stored_payload(&p)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Append one event to the log; idempotent on `event_id`. Returns 1 if the row
+/// was new, 0 if it was already present (re-sync).
+fn insert_event(conn: &Connection, ev: &StoredEvent) -> Result<usize, StoreError> {
+    let changed = conn.execute(
+        "INSERT OR IGNORE INTO events
+           (event_id, room_id, sender, type, state_key, origin_server_ts, depth, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            ev.event_id,
+            ev.room_id,
+            ev.sender,
+            ev.event_type,
+            ev.state_key,
+            ev.origin_server_ts,
+            ev.depth,
+            ev.payload.to_string(),
+        ],
+    )?;
+    Ok(changed)
+}
+
+/// Fold a state event into current state: it becomes the current `(room, type,
+/// state_key)` entry only if its `depth` is at least the incumbent's, so later
+/// state wins and re-applying the same event is a no-op (last-writer-wins by DAG
+/// depth). Assumes the event row already exists (inserted just before).
+fn fold_state(conn: &Connection, ev: &StoredEvent) -> Result<(), StoreError> {
+    let state_key = ev
+        .state_key
+        .as_deref()
+        .expect("fold_state called on a non-state event");
+    conn.execute(
+        "INSERT INTO room_state (room_id, type, state_key, event_id, depth)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(room_id, type, state_key) DO UPDATE SET
+           event_id = excluded.event_id, depth = excluded.depth
+         WHERE excluded.depth >= room_state.depth",
+        rusqlite::params![ev.room_id, ev.event_type, state_key, ev.event_id, ev.depth],
+    )?;
+    Ok(())
+}
+
+/// Rebuild a [`StoredEvent`] from a stored `payload` JSON string. A payload we
+/// wrote that no longer parses is a storage corruption, not a protocol error.
+fn parse_stored_payload(payload: &str) -> Result<StoredEvent, StoreError> {
+    let value: Value = serde_json::from_str(payload).map_err(|e| StoreError::Malformed {
+        reason: format!("corrupt stored event payload: {e}"),
+    })?;
+    StoredEvent::from_wire(&value)
+}
+
+/// Bring the schema from whatever version is on disk up to [`SCHEMA_VERSION`].
+/// Append-friendly: a future change adds a `version < N` block, never edits an
+/// existing one. Tracked via SQLite's `user_version` pragma.
+fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version < 1 {
+        conn.execute_batch(
+            "
+            -- The opaque composite sync token (`next_batch`), stored verbatim.
+            CREATE TABLE sync_token (
+                id    INTEGER PRIMARY KEY CHECK (id = 0),
+                token TEXT NOT NULL
+            );
+
+            -- Append-only event log. `event_id` is the server content hash, so
+            -- INSERT OR IGNORE makes re-syncing a batch idempotent. `payload`
+            -- retains the whole event JSON losslessly; the promoted columns are
+            -- the ones we filter/order on.
+            CREATE TABLE events (
+                event_id         TEXT PRIMARY KEY,
+                room_id          TEXT NOT NULL,
+                sender           TEXT NOT NULL,
+                type             TEXT NOT NULL,
+                state_key        TEXT,
+                origin_server_ts INTEGER NOT NULL,
+                depth            INTEGER NOT NULL,
+                payload          TEXT NOT NULL
+            );
+            -- Timeline reads: filter by room, order by DAG depth.
+            CREATE INDEX idx_events_room_depth ON events (room_id, depth, event_id);
+
+            -- Current room state, folded from state events (last-writer-wins by
+            -- depth). One row per (room, type, state_key); points at the winning
+            -- event. Membership is just type = 'p.room.member'.
+            CREATE TABLE room_state (
+                room_id   TEXT NOT NULL,
+                type      TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                event_id  TEXT NOT NULL REFERENCES events (event_id),
+                depth     INTEGER NOT NULL,
+                PRIMARY KEY (room_id, type, state_key)
+            );
+            ",
+        )?;
+    }
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A minimal wire event. `state_key: None` ⇒ a non-state (message) event.
+    #[allow(clippy::too_many_arguments)] // a test builder mirroring the wire fields
+    fn event(
+        id: &str,
+        room: &str,
+        sender: &str,
+        depth: i64,
+        ts: i64,
+        ty: &str,
+        state_key: Option<&str>,
+        content: Value,
+    ) -> Value {
+        let mut e = json!({
+            "event_id": id,
+            "room_id": room,
+            "sender": sender,
+            "type": ty,
+            "origin_server_ts": ts,
+            "depth": depth,
+            "content": content,
+        });
+        if let Some(sk) = state_key {
+            e["state_key"] = json!(sk);
+        }
+        e
+    }
+
+    fn message(id: &str, room: &str, sender: &str, depth: i64, ts: i64, body: &str) -> Value {
+        event(
+            id,
+            room,
+            sender,
+            depth,
+            ts,
+            "p.room.message",
+            None,
+            json!({ "body": body, "msgtype": "p.text" }),
+        )
+    }
+
+    #[test]
+    fn from_wire_reads_fields_and_detects_state() {
+        let msg = StoredEvent::from_wire(&message("$a", "!r:s", "@u:s", 3, 100, "hi")).unwrap();
+        assert_eq!(msg.event_id, "$a");
+        assert_eq!(msg.event_type, "p.room.message");
+        assert_eq!(msg.state_key, None);
+        assert_eq!(msg.depth, 3);
+        assert_eq!(msg.content["body"], "hi");
+
+        let member = StoredEvent::from_wire(&event(
+            "$m",
+            "!r:s",
+            "@u:s",
+            1,
+            50,
+            "p.room.member",
+            Some("@u:s"),
+            json!({ "membership": "join" }),
+        ))
+        .unwrap();
+        assert_eq!(member.state_key.as_deref(), Some("@u:s"));
+    }
+
+    #[test]
+    fn from_wire_rejects_missing_field() {
+        // No `sender` → a protocol mismatch, surfaced as Malformed.
+        let bad = json!({ "event_id": "$a", "room_id": "!r:s", "type": "p.room.message",
+                          "origin_server_ts": 1, "depth": 1, "content": {} });
+        match StoredEvent::from_wire(&bad) {
+            Err(StoreError::Malformed { reason }) => assert!(reason.contains("sender")),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_token_round_trips_and_replaces() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.load_sync_token().unwrap(), None);
+
+        // Composite token stored verbatim — never parsed.
+        store.save_sync_token("42_7").unwrap();
+        assert_eq!(store.load_sync_token().unwrap().as_deref(), Some("42_7"));
+
+        // A later token replaces the previous one (single row).
+        store.save_sync_token("99_12").unwrap();
+        assert_eq!(store.load_sync_token().unwrap().as_deref(), Some("99_12"));
+    }
+
+    #[test]
+    fn apply_events_appends_and_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        let batch = vec![
+            message("$a", "!r:s", "@u:s", 1, 100, "one"),
+            message("$b", "!r:s", "@u:s", 2, 200, "two"),
+        ];
+        // Both events are new.
+        assert_eq!(store.apply_events(&batch).unwrap(), 2);
+        // Re-applying the same batch (at-least-once delivery) inserts nothing.
+        assert_eq!(store.apply_events(&batch).unwrap(), 0);
+
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 2);
+        assert_eq!(tl[0].event_id, "$a");
+        assert_eq!(tl[1].event_id, "$b");
+    }
+
+    #[test]
+    fn timeline_orders_by_depth_and_paginates() {
+        let store = Store::open_in_memory().unwrap();
+        // Insert out of order; timeline must return depth-ascending.
+        store
+            .apply_events(&[
+                message("$c", "!r:s", "@u:s", 3, 300, "three"),
+                message("$a", "!r:s", "@u:s", 1, 100, "one"),
+                message("$b", "!r:s", "@u:s", 2, 200, "two"),
+            ])
+            .unwrap();
+
+        // Newest `limit` = 2 → the two highest-depth, oldest-first.
+        let page = store.timeline("!r:s", 2, None).unwrap();
+        assert_eq!(
+            page.iter().map(|e| e.event_id.as_str()).collect::<Vec<_>>(),
+            vec!["$b", "$c"],
+        );
+
+        // Backfill: strictly older than depth 3 → $a, $b.
+        let older = store.timeline("!r:s", 10, Some(3)).unwrap();
+        assert_eq!(
+            older
+                .iter()
+                .map(|e| e.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["$a", "$b"],
+        );
+    }
+
+    #[test]
+    fn timeline_is_scoped_to_its_room() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[
+                message("$a", "!r1:s", "@u:s", 1, 100, "in r1"),
+                message("$b", "!r2:s", "@u:s", 1, 100, "in r2"),
+            ])
+            .unwrap();
+        let r1 = store.timeline("!r1:s", 10, None).unwrap();
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0].event_id, "$a");
+    }
+
+    #[test]
+    fn state_is_folded_last_writer_wins_by_depth() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[event(
+                "$n1",
+                "!r:s",
+                "@u:s",
+                1,
+                100,
+                "p.room.name",
+                Some(""),
+                json!({ "name": "First" }),
+            )])
+            .unwrap();
+        assert_eq!(
+            store.list_rooms().unwrap()[0].name.as_deref(),
+            Some("First")
+        );
+
+        // A higher-depth name wins.
+        store
+            .apply_events(&[event(
+                "$n2",
+                "!r:s",
+                "@u:s",
+                5,
+                500,
+                "p.room.name",
+                Some(""),
+                json!({ "name": "Second" }),
+            )])
+            .unwrap();
+        assert_eq!(
+            store.list_rooms().unwrap()[0].name.as_deref(),
+            Some("Second")
+        );
+
+        // A stale (lower-depth) name that arrives late must NOT overwrite.
+        store
+            .apply_events(&[event(
+                "$n0",
+                "!r:s",
+                "@u:s",
+                2,
+                200,
+                "p.room.name",
+                Some(""),
+                json!({ "name": "Stale" }),
+            )])
+            .unwrap();
+        assert_eq!(
+            store.list_rooms().unwrap()[0].name.as_deref(),
+            Some("Second")
+        );
+    }
+
+    #[test]
+    fn list_rooms_folds_name_topic_encryption_and_orders_by_activity() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[
+                // Room A: named, with a topic, and a later message.
+                event(
+                    "$a_n",
+                    "!a:s",
+                    "@u:s",
+                    1,
+                    100,
+                    "p.room.name",
+                    Some(""),
+                    json!({ "name": "Alpha" }),
+                ),
+                event(
+                    "$a_t",
+                    "!a:s",
+                    "@u:s",
+                    1,
+                    100,
+                    "p.room.topic",
+                    Some(""),
+                    json!({ "topic": "about A" }),
+                ),
+                message("$a_m", "!a:s", "@u:s", 2, 900, "hi"),
+                // Room B: encrypted, no name, older activity.
+                event(
+                    "$b_e",
+                    "!b:s",
+                    "@u:s",
+                    1,
+                    300,
+                    "p.room.encryption",
+                    Some(""),
+                    json!({ "algorithm": "p.mls.1" }),
+                ),
+            ])
+            .unwrap();
+
+        let rooms = store.list_rooms().unwrap();
+        assert_eq!(rooms.len(), 2);
+        // Most recent activity first: A (ts 900) before B (ts 300).
+        assert_eq!(rooms[0].room_id, "!a:s");
+        assert_eq!(rooms[0].name.as_deref(), Some("Alpha"));
+        assert_eq!(rooms[0].topic.as_deref(), Some("about A"));
+        assert!(!rooms[0].encrypted);
+        assert_eq!(rooms[1].room_id, "!b:s");
+        assert_eq!(rooms[1].name, None);
+        assert!(rooms[1].encrypted);
+    }
+
+    #[test]
+    fn membership_reads_latest_member_state_per_user() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[
+                event(
+                    "$j",
+                    "!r:s",
+                    "@a:s",
+                    1,
+                    100,
+                    "p.room.member",
+                    Some("@a:s"),
+                    json!({ "membership": "join" }),
+                ),
+                event(
+                    "$i",
+                    "!r:s",
+                    "@a:s",
+                    1,
+                    100,
+                    "p.room.member",
+                    Some("@b:s"),
+                    json!({ "membership": "invite" }),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            store.membership("!r:s", "@a:s").unwrap(),
+            Some(Membership::Join)
+        );
+        assert_eq!(
+            store.membership("!r:s", "@b:s").unwrap(),
+            Some(Membership::Invite)
+        );
+        assert_eq!(store.membership("!r:s", "@nobody:s").unwrap(), None);
+
+        // A later leave supersedes the join for that user.
+        store
+            .apply_events(&[event(
+                "$l",
+                "!r:s",
+                "@a:s",
+                4,
+                400,
+                "p.room.member",
+                Some("@a:s"),
+                json!({ "membership": "leave" }),
+            )])
+            .unwrap();
+        assert_eq!(
+            store.membership("!r:s", "@a:s").unwrap(),
+            Some(Membership::Leave)
+        );
+    }
+
+    #[test]
+    fn unknown_membership_is_preserved() {
+        assert_eq!(Membership::from_wire("knock"), Membership::Knock);
+        assert_eq!(
+            Membership::from_wire("weird"),
+            Membership::Other("weird".to_owned())
+        );
+    }
+
+    #[test]
+    fn current_state_generic_accessor() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[event(
+                "$t",
+                "!r:s",
+                "@u:s",
+                1,
+                100,
+                "p.room.topic",
+                Some(""),
+                json!({ "topic": "hello" }),
+            )])
+            .unwrap();
+        let ev = store
+            .current_state("!r:s", "p.room.topic", "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev.content["topic"], "hello");
+        assert!(store
+            .current_state("!r:s", "p.room.name", "")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn malformed_event_aborts_batch_without_partial_write() {
+        let store = Store::open_in_memory().unwrap();
+        let batch = vec![
+            message("$ok", "!r:s", "@u:s", 1, 100, "fine"),
+            json!({ "event_id": "$bad", "room_id": "!r:s" }), // missing fields
+        ];
+        assert!(matches!(
+            store.apply_events(&batch),
+            Err(StoreError::Malformed { .. })
+        ));
+        // The whole batch was rejected pre-write: nothing landed.
+        assert_eq!(store.timeline("!r:s", 10, None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn schema_persists_across_reopen() {
+        let dir = std::env::temp_dir().join(format!("pigeon-store-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("store.sqlite3");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let store = Store::open(&path).unwrap();
+            store.save_sync_token("7_3").unwrap();
+            store
+                .apply_events(&[message("$a", "!r:s", "@u:s", 1, 100, "persisted")])
+                .unwrap();
+        }
+        // Reopen: migration is a no-op (already at version) and data survives.
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.load_sync_token().unwrap().as_deref(), Some("7_3"));
+            assert_eq!(store.timeline("!r:s", 10, None).unwrap().len(), 1);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}

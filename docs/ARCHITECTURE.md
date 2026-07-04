@@ -99,7 +99,7 @@ Depend on these by path (monorepo-adjacent) or pinned git rev — decided and do
 - **`api.rs`** — the only place that makes HTTP calls. Owns the homeserver base URL, token injection, ret/timeout policy, and maps `P_*` error codes → typed core errors. Models its calls on the reference CLI (`../../pigeon/clients/cli`).
 - **`session.rs`** — register/login/logout; produces a session (token, device_id, server). Secrets handed to the platform keystore via a callback; never persisted in clear.
 - **`sync.rs`** — the long-poll `/sync` loop. Treats the composite sync token as opaque (Gotcha #5), diffs the response into the store, emits change events to the host observer, and propagates cancellation when the app backgrounds (Gotcha #6).
-- **`store.rs`** — local SQLite. Source of truth for reads (offline-first). Holds rooms, timeline events (incl. **decrypted plaintext cached on first decrypt** — Gotcha #3), membership, and the sync token.
+- **`store.rs`** — local SQLite (`rusqlite`, bundled). Source of truth for reads (offline-first). Holds rooms, timeline events (incl. **decrypted plaintext cached on first decrypt** — Gotcha #3), membership, and the sync token. **Built in M2.1:** append-only `events` log (idempotent on content-hash `event_id`) + `room_state` folded last-writer-wins by DAG `depth` + verbatim `sync_token`; reads for timeline/room-list/membership/current-state; `user_version` migrations. Internal module (no FFI surface of its own); driven by the sync loop from M2.2. The decrypted-plaintext cache is layered on in M3.
 - **`rooms.rs`** — room list, create/join, paginated timeline reads, send (with local echo + a retrying send queue).
 - **`e2ee.rs`** — the bridge to `pigeon-crypto`: maintains the per-room MLS group (group_id = room_id bytes), encrypts outbound to `p.room.encrypted`, decrypts inbound, processes `p.mls.welcome`. Idempotent on at-least-once to-device delivery (Gotcha #8).
 - **`keys.rs`** — generates/publishes device identity + KeyPackages (`/keys/upload`); queries/claims peers' keys (`/keys/query`, `/keys/claim`).
@@ -226,7 +226,7 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI UI +
 
 - ~~Core dependency on the server crates: path vs pinned git rev~~ → **path deps** (`../../pigeon/crates/*`), via the `/workspace` bind mount in the dev container (M0.1).
 - ~~UniFFI style: `.udl` vs proc-macro~~ → **proc-macro / library mode** (`uniffi::setup_scaffolding!()`, UniFFI 0.28), bindings generated from the built cdylib (M0.2).
-- Local store: `sqlx` vs `rusqlite` (M2). — flag the dep.
+- ~~Local store: `sqlx` vs `rusqlite` (M2)~~ → **`rusqlite` with the `bundled` feature** (M2.1): statically compiles SQLite into the cdylib (no system-libsqlite dep under `cargo-ndk`), lighter than `sqlx`, no build-time DB. Sync API off the FFI's async path; store ops guarded by a `Mutex<Connection>`.
 - Server discovery (`.well-known`) in the core: M1 or later.
 - Push contract: what the homeserver exposes for push (confirm with the server repo before M4.4).
 - Android min SDK / NDK version pin (M0.3).
