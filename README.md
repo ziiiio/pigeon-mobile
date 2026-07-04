@@ -57,11 +57,11 @@ docker compose exec -w /workspace/pigeon-mobile/core dev \
 
 ### Host (alternative)
 
-Needs Rust plus — for the Android steps (M0.3+) — the Android SDK + NDK and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
+Needs Rust plus — for the Android steps (M0.3+) — the Android SDK + NDK and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk). The android build uses **Gradle 9.6.1 (wrapper) / AGP 9.2.1 / Kotlin 2.2.10** and targets **`compileSdk` 36**, so you need: a **full JDK with a compiler** (a JRE is not enough; verified on JDK 25 — note Gradle 8.x cannot run on JDK 25), `platforms;android-36`, an NDK (r28c used here), and the Rust Android targets (`aarch64-linux-android`, `x86_64-linux-android`). Point Gradle at the SDK via `android/local.properties` (`sdk.dir=…`), and export `ANDROID_NDK_HOME` so `cargo-ndk` finds the NDK.
 
 ```bash
 cd core && cargo test                 # build + test the core (no device needed)
-cd android && ./gradlew assembleDebug # Android app (once the app exists, M0.4+)
+cd android && ./gradlew assembleDebug # Android app: cross-compiles core, regens bindings, packages the APK
 ```
 
 ## Running against a homeserver

@@ -2,7 +2,8 @@ import org.gradle.api.tasks.Exec
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    // Kotlin support is built into AGP 9 (no `kotlin.android` plugin). Only the
+    // Compose compiler plugin is applied on top.
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -40,12 +41,12 @@ val generateUniffiBindings by tasks.registering(Exec::class) {
 
 android {
     namespace = "com.pigeon.mobile"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.pigeon.mobile"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
         ndk {
@@ -63,16 +64,33 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     buildFeatures {
         compose = true
     }
 
-    // Pick up the cargo-ndk .so output and the generated UniFFI Kotlin.
+    // Pick up the cargo-ndk .so output (packaged as native libs).
     sourceSets["main"].jniLibs.srcDir(jniLibsDir)
-    sourceSets["main"].java.srcDir(uniffiDir)
+}
+
+// AGP 9 built-in Kotlin: `kotlinOptions` is gone; set the JVM target through the
+// Kotlin compiler options. Bytecode 17 is emitted by the running JDK, so no
+// separate JDK 17 toolchain is provisioned.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+// The UniFFI bindings are pure Kotlin. Under AGP 9's built-in Kotlin, the legacy
+// `android.sourceSets[...].java.srcDir` no longer feeds the Kotlin compiler, so
+// register the generated dir on each variant's Kotlin sources via the Variant API.
+// The dir is pre-created at configuration time (addStaticSourceDirectory requires
+// it to exist); content + ordering come from `preBuild -> generateUniffiBindings`.
+androidComponents {
+    val uniffiOut = uniffiDir.get().asFile.apply { mkdirs() }
+    onVariants { variant ->
+        variant.sources.kotlin?.addStaticSourceDirectory(uniffiOut.absolutePath)
+    }
 }
 
 tasks.named("preBuild") {

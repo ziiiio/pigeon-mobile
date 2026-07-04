@@ -40,6 +40,8 @@ The whole project's risk is concentrated here: proving the Rust-core-via-UniFFI 
 
 **Exit criteria:** an emulator app displays a value computed in Rust; CI builds both lanes; the build is one command. No protocol code yet. **✅ MET:** the app displays Rust-computed values on an arm64 emulator (M0.4 above), `assembleDebug` is one command (M0.5), and CI covers both lanes (M0.6). **M0 is closed; M1 is active.**
 
+> **Toolchain upgrade (2026-07-04).** The `android/` Gradle build was moved off the M0.3 pins to run on a **Linux/amd64** developer host: **Gradle 8.9 → 9.6.1**, **AGP 8.5.2 → 9.2.1**, **Kotlin 2.0.20 → 2.2.10**, **compile/target SDK 34 → 36**, host **NDK r28c**. This was forced by the host having only **JDK 25** (Gradle 8.x cannot run on JDK 25; a JRE-only install has no compiler — a full JDK is required). AGP 9's **built-in Kotlin** meant dropping the `kotlin.android` plugin, pinning the Compose compiler plugin to AGP's bundled Kotlin (2.2.10), migrating `kotlinOptions` → `kotlin { compilerOptions }`, and feeding the generated UniFFI Kotlin via the **Variant API** (`variant.sources.kotlin`) instead of `sourceSets[...].java.srcDir`. The app (now the **M1 auth UI**, not the Hello-core screen) was **installed and run on an x86_64 API-36 emulator** — auth screen renders, the Rust `LogSink` callback reaches logcat, no crash. **⚠ Not yet done:** the Docker dev container / CI (`docker/Dockerfile`, M0.3/M0.6) still pins JDK 17 / SDK 34 / NDK 26 and must be bumped to satisfy AGP 9 before the android CI lane builds again.
+
 ---
 
 ## Phase M1 — Identity (register / login / session)
