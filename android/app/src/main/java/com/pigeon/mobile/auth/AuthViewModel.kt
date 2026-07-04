@@ -24,8 +24,17 @@ sealed interface AuthState {
     /** A register/login is in flight. */
     data object Submitting : AuthState
 
-    /** Signed in with this session identity. */
-    data class SignedIn(val session: Session) : AuthState
+    /**
+     * Signed in with this session identity. [signingOut] is true while a logout
+     * is in flight; [error] carries a logout failure that left the session
+     * intact (so the user can retry rather than see a signed-out UI over a live
+     * session).
+     */
+    data class SignedIn(
+        val session: Session,
+        val signingOut: Boolean = false,
+        val error: String? = null,
+    ) : AuthState
 }
 
 /**
@@ -64,6 +73,29 @@ class AuthViewModel : ViewModel() {
 
     fun register(server: String, username: String, password: String) =
         submit { coreRegister(server.trim(), username.trim(), password) }
+
+    /**
+     * Sign out: revoke the token server-side and clear the persisted session
+     * (both in the core). On success the handle is dropped and we return to the
+     * form. The core clears local state even if the server revoke fails; the only
+     * error it surfaces is a keystore fault — in that case the session is still
+     * live, so we stay signed in and show the reason for a retry.
+     */
+    fun logout() {
+        val current = _state.value
+        if (current !is AuthState.SignedIn || current.signingOut) return
+        val c = client ?: return
+        _state.value = current.copy(signingOut = true, error = null)
+        viewModelScope.launch {
+            _state.value = try {
+                c.logout()
+                client = null
+                AuthState.SignedOut()
+            } catch (e: CoreException) {
+                current.copy(signingOut = false, error = authErrorMessage(e))
+            }
+        }
+    }
 
     private fun submit(call: suspend () -> PigeonClient) {
         if (_state.value == AuthState.Submitting) return

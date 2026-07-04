@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use pigeon_mobile_core::session::{login, restore_session, set_key_store, KeyStore, KeyStoreError};
 use serde_json::json;
 use serial_test::serial;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// An in-memory `KeyStore` whose backing map the test retains a handle to, so it
@@ -179,4 +179,57 @@ async fn restore_with_no_stored_session_is_none() {
     let _store = MockKeyStore::install(); // fresh + empty
     let restored = restore_session().await.expect("restore ok");
     assert!(restored.is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn logout_revokes_token_and_clears_session() {
+    let store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    // The revoke endpoint must be hit with this session's bearer token.
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/logout"))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+    assert_eq!(store.entry_count(), 1, "login persisted a session");
+
+    client.logout().await.expect("logout ok");
+    assert_eq!(store.entry_count(), 0, "logout cleared the local session");
+}
+
+#[tokio::test]
+#[serial]
+async fn logout_clears_session_even_when_server_revoke_fails() {
+    // No `/logout` mock is mounted, so the revoke returns a 404. Logout must
+    // still wipe the local session (best-effort revoke — offline-friendly).
+    let store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+
+    let client = login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+    assert_eq!(store.entry_count(), 1);
+
+    client
+        .logout()
+        .await
+        .expect("logout ok despite server revoke failing");
+    assert_eq!(
+        store.entry_count(),
+        0,
+        "the local session is cleared regardless of the server's response"
+    );
+
+    // And a subsequent restore finds nothing — the user is fully signed out.
+    let restored = restore_session().await.expect("restore ok");
+    assert!(restored.is_none(), "no session survives logout");
 }

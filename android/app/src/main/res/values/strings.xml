@@ -12,4 +12,5 @@
     <string name="home_signed_in_as">Signed in as</string>
     <string name="home_device">Device</string>
     <string name="home_server">Homeserver</string>
+    <string name="home_sign_out">Sign out</string>
 </resources>

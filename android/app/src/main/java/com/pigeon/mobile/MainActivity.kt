@@ -40,7 +40,12 @@ private fun AuthFlow() {
     val state by vm.state.collectAsStateWithLifecycle()
 
     when (val s = state) {
-        is AuthState.SignedIn -> HomeScreen(s.session)
+        is AuthState.SignedIn -> HomeScreen(
+            session = s.session,
+            onSignOut = vm::logout,
+            signingOut = s.signingOut,
+            error = s.error,
+        )
         // Restoring, SignedOut, and Submitting all render through the form
         // (which shows a spinner while submitting and any error while signed out).
         AuthState.Restoring,

@@ -57,8 +57,10 @@ async fn spawn() -> anyhow::Result<(String, tests_integration::TestServer)> {
 #[tokio::test]
 async fn register_login_restore_against_real_homeserver() -> anyhow::Result<()> {
     // A key store must be installed so login/register persist and restore has
-    // something to reload.
-    set_key_store(Box::new(MemStore::default()));
+    // something to reload. Keep a handle so the logout assertions below can
+    // re-inject the pre-logout blob and prove the token was revoked server-side.
+    let store = MemStore::default();
+    set_key_store(Box::new(store.clone()));
 
     let (base, _ts) = spawn().await?;
 
@@ -90,6 +92,40 @@ async fn register_login_restore_against_real_homeserver() -> anyhow::Result<()> 
     // against the REAL `/account/whoami` and hands it back.
     let restored = restore_session().await?.expect("a session was restored");
     assert_eq!(restored.session().user_id, "@alice:test.example");
+
+    // Snapshot the persisted (still-valid) blob before logging out, so we can
+    // prove server-side revocation independently of the local clear below.
+    let pre_logout_blob = store
+        .map
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .expect("a session blob is persisted before logout");
+
+    // Log out: revoke the token against the REAL server, then clear local state.
+    restored.logout().await?;
+
+    // The local session is gone — a fresh restore finds nothing to reload.
+    assert!(
+        restore_session().await?.is_none(),
+        "logout cleared the persisted session"
+    );
+
+    // And the token really is dead server-side: re-inject the old blob and let
+    // restore validate it against the REAL `/account/whoami`. A revoked token
+    // comes back as P_UNKNOWN_TOKEN, so restore clears it and yields None —
+    // proving logout revoked server-side, not just wiped the local keystore.
+    store
+        .map
+        .lock()
+        .unwrap()
+        .insert("pigeon.session.v1".into(), pre_logout_blob);
+    assert!(
+        restore_session().await?.is_none(),
+        "the token was revoked server-side; restore rejects and clears it"
+    );
 
     Ok(())
 }

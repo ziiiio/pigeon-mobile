@@ -43,11 +43,10 @@ pub struct Session {
 /// value across the FFI except [`Session`].
 #[derive(uniffi::Object)]
 pub struct PigeonClient {
-    // The token-bearing HTTP client for this session. Held now, read from M1.5
-    // (logout) and M2 (sync) — the authenticated flows that hang off the client.
-    // `allow(dead_code)` until then; removing it would mean dropping the token,
-    // which is the whole point of the object.
-    #[allow(dead_code)]
+    // The token-bearing HTTP client for this session. Read by `logout` (M1.5) to
+    // revoke the token server-side, and by the authenticated flows that hang off
+    // the client in later phases (sync, M2). The token stays inside — never
+    // returned across the FFI.
     api: Api,
     session: Session,
 }
@@ -57,6 +56,32 @@ impl PigeonClient {
     /// The non-secret session identity for this client.
     pub fn session(&self) -> Session {
         self.session.clone()
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl PigeonClient {
+    /// Log out (M1.5): revoke this session's token server-side, then clear the
+    /// persisted session from the keystore. After this the handle is spent — the
+    /// UI drops it and returns to the signed-out state.
+    ///
+    /// The server-side revoke is **best-effort**, mirroring the reference CLI
+    /// (`../../pigeon/clients/cli/src/main.rs::logout`): an unreachable server or
+    /// an already-dead token must not strand the user holding a session they
+    /// can't clear, so the local keystore is wiped regardless. A genuine keystore
+    /// fault *is* surfaced ([`CoreError::Storage`]) — the blob would otherwise
+    /// linger and silently restore on the next launch.
+    pub async fn logout(&self) -> Result<(), CoreError> {
+        // Best-effort server revoke; its outcome doesn't gate the local wipe.
+        if let Err(err) = self.api.logout().await {
+            crate::emit(
+                LogLevel::Info,
+                "session",
+                &format!("server logout failed; clearing local session anyway: {err}"),
+            );
+        }
+        ks_delete(SESSION_KEY)?;
+        Ok(())
     }
 }
 
