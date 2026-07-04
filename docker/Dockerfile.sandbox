@@ -1,0 +1,40 @@
+# claude-sandbox — the pigeon-mobile dev toolchain + Claude Code, for running an
+# autonomous session with `--dangerously-skip-permissions` inside an isolated,
+# read-only container. The only writable surfaces at runtime are the bind-mounted
+# repo (so edits persist to the host) and a few tmpfs/volume mounts for caches —
+# everything else is read-only, which is the point of `--dangerously-skip-*`.
+#
+# Build (the base image must exist first — `docker compose build dev`):
+#   docker build -f docker/Dockerfile.sandbox -t claude-sandbox .
+# Run (wires the correct mounts/env for you):
+#   ANTHROPIC_API_KEY=… ./scripts/claude-sandbox.sh
+#
+# Capability note: this reuses the dev image, whose Android toolchain (JDK 17 /
+# SDK 34 / NDK 26) is too old for AGP 9 — so the Rust **core** builds and tests
+# fully in here (`cargo test`/`clippy`/`fmt`), but the Android app's
+# `./gradlew assembleDebug` still runs on the host (JDK 25 / SDK 36 / NDK r28c),
+# exactly as during development. Bump the base toolchain to build the app in here.
+FROM pigeon-mobile-dev
+
+# Node + the Claude Code CLI. NodeSource gives a current LTS (the base is Debian
+# bookworm, whose packaged Node/npm are too old for the CLI).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
+# IS_SANDBOX=1 lets `claude --dangerously-skip-permissions` run as root (the CLI
+# otherwise refuses root skip-permissions). CARGO_HOME/GRADLE_USER_HOME are moved
+# off the read-only rootfs onto paths the run script mounts writable — the base's
+# /usr/local/cargo would be read-only except for a sub-mount, which cargo's
+# package-cache lock can't tolerate. The cargo/rustc binaries stay on PATH
+# (/usr/local/cargo/bin), so only the caches relocate.
+ENV IS_SANDBOX=1 \
+    CARGO_HOME=/cargo \
+    GRADLE_USER_HOME=/gradle
+
+# Pre-create the mountpoints so they exist even under a read-only rootfs.
+RUN mkdir -p /cargo /gradle
