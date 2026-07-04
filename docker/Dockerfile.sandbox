@@ -9,11 +9,9 @@
 # Run (wires the correct mounts/env for you):
 #   ANTHROPIC_API_KEY=… ./scripts/claude-sandbox.sh
 #
-# Capability note: this reuses the dev image, whose Android toolchain (JDK 17 /
-# SDK 34 / NDK 26) is too old for AGP 9 — so the Rust **core** builds and tests
-# fully in here (`cargo test`/`clippy`/`fmt`), but the Android app's
-# `./gradlew assembleDebug` still runs on the host (JDK 25 / SDK 36 / NDK r28c),
-# exactly as during development. Bump the base toolchain to build the app in here.
+# Capability: this reuses the dev image, whose toolchain now matches the host
+# (JDK 25 / SDK 36 / NDK r28c), so both the Rust **core** (`cargo test`/`clippy`/
+# `fmt`) and the Android app (`./gradlew assembleDebug`) build in here.
 FROM pigeon-mobile-dev
 
 # Node + the Claude Code CLI. NodeSource gives a current LTS (the base is Debian
