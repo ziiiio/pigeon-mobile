@@ -40,6 +40,14 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# base64 transport encoding for E2EE wire material (M3): the crypto layer
+# (`pigeon-crypto`) returns raw MLS bytes (public keys, KeyPackages, Welcomes,
+# ciphertext) and the Client–Server API carries them as base64 strings — this
+# does that encode/decode. NOT a crypto primitive (pure encoding); pinned to the
+# server workspace's version so both sides agree. (Flagged dep — sanctioned:
+# already used by the homeserver + reference CLI.)
+base64 = "0.22"
+
 # Local persistence (M2.1): the offline-first store (rooms, timeline, sync token,
 # membership). `bundled` statically compiles SQLite into the cdylib, so the
 # Android/iOS cross-builds carry no system-libsqlite dependency (cargo-ndk stays

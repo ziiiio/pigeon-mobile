@@ -17,6 +17,8 @@ use pigeon_crypto::Device;
 
 /// The Client–Server API HTTP client (M1.1).
 pub mod api;
+/// MLS end-to-end encryption engine — wraps `pigeon-crypto` (M3).
+pub mod e2ee;
 /// Rooms: list, create/join (M2.3), timeline (M2.4), send (M2.5).
 pub mod rooms;
 /// Session lifecycle — register/login and the logged-in client object (M1.2).
@@ -54,6 +56,17 @@ pub enum CoreError {
     /// from `session::KeyStoreError`. (M1.3.)
     #[error("storage error: {reason}")]
     Storage { reason: String },
+}
+
+/// Map a `pigeon-crypto` MLS failure onto the FFI-visible error (M3). The engine
+/// wraps every openmls operation; a failure here is a crypto fault (a bad
+/// KeyPackage/Welcome, an out-of-order ratchet, a tampered ciphertext).
+impl From<pigeon_crypto::CryptoError> for CoreError {
+    fn from(err: pigeon_crypto::CryptoError) -> Self {
+        CoreError::Crypto {
+            reason: err.to_string(),
+        }
+    }
 }
 
 /// Map the HTTP layer's typed failure onto the FFI-visible error. The `P_*` code

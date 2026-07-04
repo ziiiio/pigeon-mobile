@@ -294,6 +294,76 @@ impl Api {
         json_string(&resp, "room_id")
     }
 
+    // --- E2EE key directory (M3) --------------------------------------------
+    // Mirror the reference CLI (../../pigeon/clients/cli/src/api.rs). All key
+    // material is opaque base64 the server stores/forwards verbatim (it's an MLS
+    // delivery service — it never parses MLS bytes). `user_id`/`device_id` are
+    // stamped server-side from the token, so they're absent from the body.
+
+    /// `POST /keys/upload` — publish this device's ed25519 identity key and a
+    /// pool of base64 KeyPackages (M3.1). Returns the device's remaining
+    /// KeyPackage count (each peer that adds us to a group claims one).
+    pub async fn upload_keys(
+        &self,
+        device_id: &str,
+        public_key_b64: &str,
+        key_packages_b64: &[String],
+    ) -> Result<u32, ApiError> {
+        let packages: Vec<Value> = key_packages_b64
+            .iter()
+            .enumerate()
+            .map(|(i, pkg)| json!({ "key_id": format!("kp-{i}"), "package": pkg }))
+            .collect();
+        let body = json!({
+            "device_keys": {
+                "algorithms": ["p.mls.1"],
+                "keys": { format!("ed25519:{device_id}"): public_key_b64 },
+                "signatures": {}
+            },
+            "key_packages": packages,
+        });
+        let resp = self.post("/_pigeon/client/v1/keys/upload", &body).await?;
+        Ok(resp["key_package_count"].as_u64().unwrap_or(0) as u32)
+    }
+
+    /// `POST /keys/query` — list a user's published devices (M3.2). Sends an
+    /// empty device list (= all devices). Returns the `{ device_id -> DeviceKeys }`
+    /// map for `user_id` (empty if the user has published nothing).
+    pub async fn query_keys(&self, user_id: &str) -> Result<Value, ApiError> {
+        let body = json!({ "device_keys": { user_id: [] } });
+        let resp = self.post("/_pigeon/client/v1/keys/query", &body).await?;
+        Ok(resp["device_keys"][user_id].clone())
+    }
+
+    /// `POST /keys/claim` — claim one KeyPackage from a specific device (M3.2),
+    /// consuming a one-time package (or the reusable last-resort one). Returns the
+    /// base64 KeyPackage, or `None` if that device has none left to give.
+    pub async fn claim_keys(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, ApiError> {
+        let body = json!({ "one_time_keys": { user_id: [device_id] } });
+        let resp = self.post("/_pigeon/client/v1/keys/claim", &body).await?;
+        Ok(resp["one_time_keys"][user_id][device_id]["package"]
+            .as_str()
+            .map(str::to_owned))
+    }
+
+    /// `PUT /sendToDevice/{event_type}/{txn_id}` — deliver a to-device message
+    /// (M3.3), e.g. an MLS `Welcome` (`event_type = "p.mls.welcome"`). `messages`
+    /// is `{ user_id -> { device_id -> content } }` (content stored verbatim).
+    pub async fn send_to_device(
+        &self,
+        event_type: &str,
+        txn_id: &str,
+        messages: &Value,
+    ) -> Result<(), ApiError> {
+        let path = format!("/_pigeon/client/v1/sendToDevice/{event_type}/{txn_id}");
+        self.put(&path, &json!({ "messages": messages })).await?;
+        Ok(())
+    }
+
     /// `POST /rooms/{room_id}/invite` (`{ user_id }`) → the invite event id.
     pub async fn invite(&self, room_id: &str, user_id: &str) -> Result<String, ApiError> {
         let path = format!("/_pigeon/client/v1/rooms/{room_id}/invite");

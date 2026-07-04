@@ -127,6 +127,12 @@ fn apply_sync(client: &PigeonClient, resp: &Value) -> Result<bool, CoreError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    // `login` (in `client()`) now also mints an MLS identity that persists through
+    // the process-global key store (M3.1). The e2ee unit tests in this same test
+    // binary install their own key store, so serialise anything that logs in to
+    // avoid racing on that global. (No key store is installed here, so the writes
+    // are no-ops — but the guard keeps it that way if one ever is.)
+    use serial_test::serial;
 
     /// A `/sync`-shaped response with one joined room carrying `events`.
     fn sync_response(next_batch: &str, room_id: &str, events: Value) -> Value {
@@ -167,6 +173,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn apply_sync_folds_events_and_advances_token() {
         let client = client().await;
         let resp = sync_response(
@@ -186,6 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn apply_sync_is_idempotent_and_reports_no_change_on_replay() {
         let client = client().await;
         let resp = sync_response(
@@ -200,6 +208,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn apply_sync_advances_token_on_empty_batch() {
         let client = client().await;
         let empty = json!({ "next_batch": "7_2", "rooms": { "join": {} } });

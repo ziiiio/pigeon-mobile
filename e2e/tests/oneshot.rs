@@ -216,14 +216,15 @@ async fn register_login_restore_against_real_homeserver() -> anyhow::Result<()> 
     let restored = restore_session().await?.expect("a session was restored");
     assert_eq!(restored.session().user_id, "@alice:test.example");
 
-    // Snapshot the persisted (still-valid) blob before logging out, so we can
-    // prove server-side revocation independently of the local clear below.
+    // Snapshot the persisted (still-valid) session blob before logging out, so we
+    // can prove server-side revocation independently of the local clear below.
+    // (Login also persists an MLS device-state entry now — M3.1 — so grab the
+    // session entry by key, not "the only entry".)
     let pre_logout_blob = store
         .map
         .lock()
         .unwrap()
-        .values()
-        .next()
+        .get("pigeon.session.v1")
         .cloned()
         .expect("a session blob is persisted before logout");
 

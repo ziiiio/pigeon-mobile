@@ -34,6 +34,11 @@ impl KeyStore for MockKeyStore {
     }
 }
 
+/// The keystore entry holding the session blob (identity + token). Distinct from
+/// the MLS device-state entry that login/logout also write/clear (M3.1), so the
+/// assertions below target the session entry by key rather than "the only entry".
+const SESSION_KEY: &str = "pigeon.session.v1";
+
 impl MockKeyStore {
     /// Install a fresh mock key store and keep a handle to inspect it.
     fn install() -> Self {
@@ -41,15 +46,17 @@ impl MockKeyStore {
         set_key_store(Box::new(store.clone()));
         store
     }
-    fn entry_count(&self) -> usize {
-        self.map.lock().unwrap().len()
+    /// Whether a session blob is currently persisted.
+    fn has_session(&self) -> bool {
+        self.map.lock().unwrap().contains_key(SESSION_KEY)
     }
-    /// The single stored blob, decoded as JSON (panics unless exactly one entry).
-    fn only_blob(&self) -> serde_json::Value {
-        let map = self.map.lock().unwrap();
-        assert_eq!(map.len(), 1, "expected exactly one stored entry");
-        let bytes = map.values().next().unwrap();
-        serde_json::from_slice(bytes).expect("stored blob is JSON")
+    /// The persisted session blob, decoded as JSON (`None` if absent).
+    fn session_blob(&self) -> Option<serde_json::Value> {
+        self.map
+            .lock()
+            .unwrap()
+            .get(SESSION_KEY)
+            .map(|bytes| serde_json::from_slice(bytes).expect("stored blob is JSON"))
     }
 }
 
@@ -82,7 +89,7 @@ async fn login_persists_session_blob() {
 
     // The identity AND the token were persisted (the whole blob is keystore-
     // protected at rest — Gotcha #1).
-    let blob = store.only_blob();
+    let blob = store.session_blob().expect("a session blob was persisted");
     assert_eq!(blob["user_id"], "@alice:test.example");
     assert_eq!(blob["device_id"], "DEVICE1");
     assert_eq!(blob["server"], server.uri());
@@ -132,11 +139,11 @@ async fn restore_clears_revoked_token() {
     login(server.uri(), "alice".into(), "hunter2".into())
         .await
         .expect("login ok");
-    assert_eq!(store.entry_count(), 1, "login persisted a session");
+    assert!(store.has_session(), "login persisted a session");
 
     let restored = restore_session().await.expect("restore ok");
     assert!(restored.is_none(), "a revoked token yields no session");
-    assert_eq!(store.entry_count(), 0, "the dead session was cleared");
+    assert!(!store.has_session(), "the dead session was cleared");
 }
 
 #[tokio::test]
@@ -155,10 +162,9 @@ async fn restore_is_optimistic_when_offline() {
     // isn't synchronous, so it can't be relied on to refuse connections.)
     {
         let mut map = store.map.lock().unwrap();
-        let key = map.keys().next().unwrap().clone();
-        let mut blob: serde_json::Value = serde_json::from_slice(&map[&key]).unwrap();
+        let mut blob: serde_json::Value = serde_json::from_slice(&map[SESSION_KEY]).unwrap();
         blob["server"] = json!("http://127.0.0.1:1");
-        map.insert(key, blob.to_string().into_bytes());
+        map.insert(SESSION_KEY.into(), blob.to_string().into_bytes());
     }
 
     let restored = restore_session().await.expect("restore ok");
@@ -166,9 +172,8 @@ async fn restore_is_optimistic_when_offline() {
         restored.is_some(),
         "offline restore keeps the session rather than logging out"
     );
-    assert_eq!(
-        store.entry_count(),
-        1,
+    assert!(
+        store.has_session(),
         "the session was NOT cleared while offline"
     );
 }
@@ -199,10 +204,10 @@ async fn logout_revokes_token_and_clears_session() {
     let client = login(server.uri(), "alice".into(), "hunter2".into())
         .await
         .expect("login ok");
-    assert_eq!(store.entry_count(), 1, "login persisted a session");
+    assert!(store.has_session(), "login persisted a session");
 
     client.logout().await.expect("logout ok");
-    assert_eq!(store.entry_count(), 0, "logout cleared the local session");
+    assert!(!store.has_session(), "logout cleared the local session");
 }
 
 #[tokio::test]
@@ -217,15 +222,14 @@ async fn logout_clears_session_even_when_server_revoke_fails() {
     let client = login(server.uri(), "alice".into(), "hunter2".into())
         .await
         .expect("login ok");
-    assert_eq!(store.entry_count(), 1);
+    assert!(store.has_session());
 
     client
         .logout()
         .await
         .expect("logout ok despite server revoke failing");
-    assert_eq!(
-        store.entry_count(),
-        0,
+    assert!(
+        !store.has_session(),
         "the local session is cleared regardless of the server's response"
     );
 

@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crate::api::{Api, ApiError, AuthResponse, ErrorCode};
+use crate::e2ee::{E2ee, KEY_PACKAGE_COUNT};
 use crate::store::Store;
 use crate::{CoreError, LogLevel};
 
@@ -59,6 +60,11 @@ pub struct PigeonClient {
     /// (M2). Shared (`Arc`) so a spawned sync task and the UI-facing reads use
     /// the one connection. Dropped with the client on logout.
     pub(crate) store: Arc<Store>,
+    /// The MLS end-to-end encryption engine for this session (M3). Owns the
+    /// device identity + group state (all secrets stay inside it); the `e2ee`,
+    /// `keys`, and `rooms` modules drive it. `None` only if the identity could
+    /// not be created/restored (E2EE unavailable — plaintext still works).
+    pub(crate) e2ee: Option<E2ee>,
 }
 
 #[uniffi::export]
@@ -66,6 +72,48 @@ impl PigeonClient {
     /// The non-secret session identity for this client.
     pub fn session(&self) -> Session {
         self.session.clone()
+    }
+}
+
+impl PigeonClient {
+    /// Publish this device's MLS identity key + a pool of KeyPackages via
+    /// `/keys/upload` (M3.1), so peers can claim a package to add us to encrypted
+    /// groups. **Best-effort**, exactly as the reference CLI does: a failure
+    /// (offline, or no MLS identity) is logged, not fatal — plaintext rooms keep
+    /// working, and keys can be re-published on the next login. Never logs key
+    /// material (Gotcha #2).
+    pub(crate) async fn publish_device_keys(&self) {
+        let Some(e2ee) = self.e2ee.as_ref() else {
+            return;
+        };
+        let kps = match e2ee.key_packages(KEY_PACKAGE_COUNT) {
+            Ok(kps) => kps,
+            Err(err) => {
+                crate::emit(
+                    LogLevel::Warn,
+                    "e2ee",
+                    &format!("could not generate KeyPackages: {err}"),
+                );
+                return;
+            }
+        };
+        let pubkey = e2ee.signature_public_key_b64();
+        match self
+            .api
+            .upload_keys(&self.session.device_id, &pubkey, &kps)
+            .await
+        {
+            Ok(count) => crate::emit(
+                LogLevel::Info,
+                "e2ee",
+                &format!("published device keys ({count} KeyPackages available)"),
+            ),
+            Err(err) => crate::emit(
+                LogLevel::Warn,
+                "e2ee",
+                &format!("device key upload failed (E2EE limited until next login): {err}"),
+            ),
+        }
     }
 }
 
@@ -91,6 +139,9 @@ impl PigeonClient {
             );
         }
         ks_delete(SESSION_KEY)?;
+        // Wipe the MLS device state too — a new login mints a fresh identity, so
+        // the old private keys/groups must not linger in the keystore (Gotcha #1).
+        E2ee::clear()?;
         Ok(())
     }
 }
@@ -175,7 +226,8 @@ pub fn set_key_store(store: Box<dyn KeyStore>) {
 // is never held across an `.await` (that would risk a deadlock and isn't Send).
 
 /// Persist `value`; returns `false` if no key store is installed (nothing done).
-fn ks_put(key: &str, value: Vec<u8>) -> Result<bool, CoreError> {
+/// `pub(crate)` so the e2ee engine can persist MLS state through the same store.
+pub(crate) fn ks_put(key: &str, value: Vec<u8>) -> Result<bool, CoreError> {
     match KEY_STORE.read().expect("key store lock poisoned").as_ref() {
         Some(store) => {
             store.put(key.to_owned(), value)?;
@@ -186,7 +238,7 @@ fn ks_put(key: &str, value: Vec<u8>) -> Result<bool, CoreError> {
 }
 
 /// Read a value; `None` if absent or if no key store is installed.
-fn ks_get(key: &str) -> Result<Option<Vec<u8>>, CoreError> {
+pub(crate) fn ks_get(key: &str) -> Result<Option<Vec<u8>>, CoreError> {
     match KEY_STORE.read().expect("key store lock poisoned").as_ref() {
         Some(store) => Ok(store.get(key.to_owned())?),
         None => Ok(None),
@@ -194,7 +246,7 @@ fn ks_get(key: &str) -> Result<Option<Vec<u8>>, CoreError> {
 }
 
 /// Delete a key (no-op if absent or if no key store is installed).
-fn ks_delete(key: &str) -> Result<(), CoreError> {
+pub(crate) fn ks_delete(key: &str) -> Result<(), CoreError> {
     if let Some(store) = KEY_STORE.read().expect("key store lock poisoned").as_ref() {
         store.delete(key.to_owned())?;
     }
@@ -259,10 +311,25 @@ fn finish_login(
     }
     api.set_token(Some(auth.access_token));
     let store = open_store()?;
+    // Mint a fresh MLS device identity for this session (M3.1). Best-effort: if
+    // it fails, E2EE is unavailable but plaintext rooms still work — so we log
+    // and carry on rather than failing the login.
+    let e2ee = match E2ee::create(&session.user_id) {
+        Ok(engine) => Some(engine),
+        Err(err) => {
+            crate::emit(
+                LogLevel::Warn,
+                "e2ee",
+                &format!("could not create MLS identity; E2EE disabled this session: {err}"),
+            );
+            None
+        }
+    };
     Ok(Arc::new(PigeonClient {
         api,
         session,
         store,
+        e2ee,
     }))
 }
 
@@ -278,7 +345,9 @@ pub async fn register(
 ) -> Result<Arc<PigeonClient>, CoreError> {
     let api = Api::new(&server, None)?;
     let auth = api.register(&username, &password).await?;
-    finish_login(server, api, auth)
+    let client = finish_login(server, api, auth)?;
+    client.publish_device_keys().await;
+    Ok(client)
 }
 
 /// Log into an existing account on `server` and return a logged-in client.
@@ -293,7 +362,44 @@ pub async fn login(
 ) -> Result<Arc<PigeonClient>, CoreError> {
     let api = Api::new(&server, None)?;
     let auth = api.login(&user, &password).await?;
-    finish_login(server, api, auth)
+    let client = finish_login(server, api, auth)?;
+    client.publish_device_keys().await;
+    Ok(client)
+}
+
+/// Restore the session's MLS engine on launch, or mint a fresh identity if none
+/// is persisted (a session predating E2EE, or corrupt state). Returns the engine
+/// and whether it was freshly minted (⇒ its keys must be published). All failures
+/// are best-effort: E2EE degrades to unavailable (`None`), never blocking launch.
+fn restore_or_mint_e2ee(user_id: &str) -> (Option<E2ee>, bool) {
+    match E2ee::restore(user_id) {
+        Ok(Some(engine)) => (Some(engine), false),
+        Ok(None) => mint_e2ee(user_id),
+        Err(err) => {
+            // Corrupt/unreadable state — mint a fresh identity rather than
+            // stranding the session without E2EE.
+            crate::emit(
+                LogLevel::Warn,
+                "e2ee",
+                &format!("stored MLS state unusable; minting a fresh identity: {err}"),
+            );
+            mint_e2ee(user_id)
+        }
+    }
+}
+
+fn mint_e2ee(user_id: &str) -> (Option<E2ee>, bool) {
+    match E2ee::create(user_id) {
+        Ok(engine) => (Some(engine), true),
+        Err(err) => {
+            crate::emit(
+                LogLevel::Warn,
+                "e2ee",
+                &format!("could not create MLS identity; E2EE disabled this session: {err}"),
+            );
+            (None, false)
+        }
+    }
 }
 
 /// Restore a persisted session on launch, if one exists.
@@ -303,6 +409,10 @@ pub async fn login(
 /// `/account/whoami`, but restore stays usable **offline**: a transport failure
 /// restores the session optimistically, and a genuinely stale token will surface
 /// on the next authenticated call rather than blocking launch.
+///
+/// The MLS engine is restored from the keystore alongside the session (M3.1) so
+/// existing encrypted groups survive a relaunch; if it had to be freshly minted
+/// (e.g. an older session), its keys are (re)published when online.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
     let Some(bytes) = ks_get(SESSION_KEY)? else {
@@ -313,11 +423,21 @@ pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
 
     match api.whoami().await {
         // Token accepted — a live session.
-        Ok(_) => Ok(Some(Arc::new(PigeonClient {
-            api,
-            session,
-            store: open_store()?,
-        }))),
+        Ok(_) => {
+            let (e2ee, minted) = restore_or_mint_e2ee(&session.user_id);
+            let client = Arc::new(PigeonClient {
+                api,
+                session,
+                store: open_store()?,
+                e2ee,
+            });
+            // Only publish if we minted a new identity (online path); a restored
+            // identity's keys are already on the server.
+            if minted {
+                client.publish_device_keys().await;
+            }
+            Ok(Some(client))
+        }
         // Token is definitively dead: drop it so we don't loop on a revoked
         // session. `None` reads to the UI as "logged out".
         Err(ApiError::Server {
@@ -328,17 +448,21 @@ pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
             Ok(None)
         }
         // Offline / unreachable: trust the stored token and restore. Do NOT log
-        // the user out just because the network is down (offline-first).
+        // the user out just because the network is down (offline-first). The MLS
+        // engine restores from the local keystore regardless; if it had to be
+        // minted fresh, key publishing waits for the next online session.
         Err(ApiError::Network { .. }) => {
             crate::emit(
                 LogLevel::Info,
                 "session",
                 "restored session without server validation (offline)",
             );
+            let (e2ee, _minted) = restore_or_mint_e2ee(&session.user_id);
             Ok(Some(Arc::new(PigeonClient {
                 api,
                 session,
                 store: open_store()?,
+                e2ee,
             })))
         }
         // Any other server/protocol error is unexpected during a token check.
