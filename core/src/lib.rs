@@ -19,6 +19,8 @@ use pigeon_crypto::Device;
 pub mod api;
 /// MLS end-to-end encryption engine — wraps `pigeon-crypto` (M3).
 pub mod e2ee;
+/// Key-directory orchestration — query/claim peers' KeyPackages (M3.2).
+pub mod keys;
 /// Rooms: list, create/join (M2.3), timeline (M2.4), send (M2.5).
 pub mod rooms;
 /// Session lifecycle — register/login and the logged-in client object (M1.2).
