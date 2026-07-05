@@ -135,3 +135,12 @@ jobs:
       - name: build + run Hello-core on a simulator
         working-directory: pigeon-mobile/ios
         run: ./run-hellocore.sh
+
+      # M5.3 — build the real Pigeon app (OS-integration layer: KeychainKeyStore,
+      # OsLogSink, PhotoPicker, SyncController) and run its unit tests on a
+      # simulator. The KeychainKeyStore suite exercises the real iOS Keychain
+      # (ad-hoc signed for the keychain-access-group entitlement). The iOS
+      # analogue of Android's testDebugUnitTest.
+      - name: build + test the Pigeon app on a simulator
+        working-directory: pigeon-mobile/ios
+        run: ./run-tests.sh

@@ -1,0 +1,421 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		2000000000000000000030 /* PigeonApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000020 /* PigeonApp.swift */; };
+		2000000000000000000031 /* OsLogSink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000021 /* OsLogSink.swift */; };
+		2000000000000000000032 /* KeychainKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000022 /* KeychainKeyStore.swift */; };
+		2000000000000000000033 /* PhotoPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000023 /* PhotoPicker.swift */; };
+		2000000000000000000034 /* SyncController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000024 /* SyncController.swift */; };
+		2000000000000000000035 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000025 /* RootView.swift */; };
+		2000000000000000000036 /* KeychainKeyStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000026 /* KeychainKeyStoreTests.swift */; };
+		2000000000000000000042 /* PigeonCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2000000000000000000041 /* PigeonCore */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		2000000000000000000051 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2000000000000000000010;
+			remoteInfo = Pigeon;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		2000000000000000000011 /* Pigeon.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pigeon.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2000000000000000000016 /* PigeonTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PigeonTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2000000000000000000020 /* PigeonApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PigeonApp.swift; sourceTree = "<group>"; };
+		2000000000000000000021 /* OsLogSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OsLogSink.swift; sourceTree = "<group>"; };
+		2000000000000000000022 /* KeychainKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainKeyStore.swift; sourceTree = "<group>"; };
+		2000000000000000000023 /* PhotoPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoPicker.swift; sourceTree = "<group>"; };
+		2000000000000000000024 /* SyncController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncController.swift; sourceTree = "<group>"; };
+		2000000000000000000025 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		2000000000000000000026 /* KeychainKeyStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainKeyStoreTests.swift; sourceTree = "<group>"; };
+		2000000000000000000027 /* Pigeon.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Pigeon.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2000000000000000000013 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2000000000000000000042 /* PigeonCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2000000000000000000018 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000004 /* Pigeon */,
+				2000000000000000000005 /* PigeonTests */,
+				2000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		2000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000011 /* Pigeon.app */,
+				2000000000000000000016 /* PigeonTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		2000000000000000000004 /* Pigeon */ = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000020 /* PigeonApp.swift */,
+				2000000000000000000025 /* RootView.swift */,
+				2000000000000000000021 /* OsLogSink.swift */,
+				2000000000000000000022 /* KeychainKeyStore.swift */,
+				2000000000000000000023 /* PhotoPicker.swift */,
+				2000000000000000000024 /* SyncController.swift */,
+				2000000000000000000027 /* Pigeon.entitlements */,
+			);
+			path = Pigeon;
+			sourceTree = "<group>";
+		};
+		2000000000000000000005 /* PigeonTests */ = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000026 /* KeychainKeyStoreTests.swift */,
+			);
+			path = PigeonTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2000000000000000000010 /* Pigeon */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2000000000000000000061 /* Build configuration list for PBXNativeTarget "Pigeon" */;
+			buildPhases = (
+				2000000000000000000012 /* Sources */,
+				2000000000000000000013 /* Frameworks */,
+				2000000000000000000014 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Pigeon;
+			packageProductDependencies = (
+				2000000000000000000041 /* PigeonCore */,
+			);
+			productName = Pigeon;
+			productReference = 2000000000000000000011 /* Pigeon.app */;
+			productType = "com.apple.product-type.application";
+		};
+		2000000000000000000015 /* PigeonTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2000000000000000000062 /* Build configuration list for PBXNativeTarget "PigeonTests" */;
+			buildPhases = (
+				2000000000000000000017 /* Sources */,
+				2000000000000000000018 /* Frameworks */,
+				2000000000000000000019 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2000000000000000000050 /* PBXTargetDependency */,
+			);
+			name = PigeonTests;
+			packageProductDependencies = (
+			);
+			productName = PigeonTests;
+			productReference = 2000000000000000000016 /* PigeonTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		2000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					2000000000000000000010 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+					2000000000000000000015 = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 2000000000000000000010;
+					};
+				};
+			};
+			buildConfigurationList = 2000000000000000000060 /* Build configuration list for PBXProject "Pigeon" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 2000000000000000000002;
+			packageReferences = (
+				2000000000000000000040 /* XCLocalSwiftPackageReference "PigeonCore" */,
+			);
+			productRefGroup = 2000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				2000000000000000000010 /* Pigeon */,
+				2000000000000000000015 /* PigeonTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		2000000000000000000014 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2000000000000000000019 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2000000000000000000012 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2000000000000000000030 /* PigeonApp.swift in Sources */,
+				2000000000000000000035 /* RootView.swift in Sources */,
+				2000000000000000000031 /* OsLogSink.swift in Sources */,
+				2000000000000000000032 /* KeychainKeyStore.swift in Sources */,
+				2000000000000000000033 /* PhotoPicker.swift in Sources */,
+				2000000000000000000034 /* SyncController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2000000000000000000017 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2000000000000000000036 /* KeychainKeyStoreTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2000000000000000000050 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2000000000000000000010 /* Pigeon */;
+			targetProxy = 2000000000000000000051 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2000000000000000000070 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		2000000000000000000071 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		2000000000000000000072 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
+				CODE_SIGN_ENTITLEMENTS = Pigeon/Pigeon.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pigeon.mobile;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		2000000000000000000073 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
+				CODE_SIGN_ENTITLEMENTS = Pigeon/Pigeon.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pigeon.mobile;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		2000000000000000000074 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pigeon.mobile.PigeonTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pigeon.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pigeon";
+			};
+			name = Debug;
+		};
+		2000000000000000000075 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.pigeon.mobile.PigeonTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pigeon.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pigeon";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2000000000000000000060 /* Build configuration list for PBXProject "Pigeon" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2000000000000000000070 /* Debug */,
+				2000000000000000000071 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2000000000000000000061 /* Build configuration list for PBXNativeTarget "Pigeon" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2000000000000000000072 /* Debug */,
+				2000000000000000000073 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2000000000000000000062 /* Build configuration list for PBXNativeTarget "PigeonTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2000000000000000000074 /* Debug */,
+				2000000000000000000075 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		2000000000000000000040 /* XCLocalSwiftPackageReference "PigeonCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = PigeonCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2000000000000000000041 /* PigeonCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PigeonCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 2000000000000000000001 /* Project object */;
+}

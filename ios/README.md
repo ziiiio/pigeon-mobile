@@ -6,7 +6,7 @@ pickers). No protocol or crypto code is written in Swift — that all lives once
 the core, and reaches Swift through UniFFI-generated bindings. This mirrors how the
 Android app consumes the core through generated Kotlin.
 
-## Status (M5.2 — core packaged for Swift + Hello-core runs on a simulator)
+## Status (M5.3 — core packaged for Swift, Hello-core runs, OS-integration layer built + tested)
 
 - ✅ **Swift bindings generate cleanly** from the core. The full FFI surface comes
   through: `PigeonClient` (with its `async throws` methods), the records
@@ -59,10 +59,23 @@ run the script before opening the app.
   values returned through the bindings. It backs the **macOS CI lane**. Verified
   green on an `iPhone 16` simulator (iOS 18.4). Still **not runnable in the Linux
   dev container** (no simulator) — that only generates the bindings.
-- **M5.3** — Apple OS integration: Keychain-backed `KeyStore`, `os_log`-backed
-  `LogSink`, `PickVisualMedia`-style photo picker, background-refresh-aware sync.
-  (APNs push mirrors Android's M4.4 and is **blocked** until the homeserver exposes
-  a push contract.)
+- ✅ **M5.3 — Apple OS integration (built + tested).** The real `Pigeon` app
+  ([`Pigeon/`](Pigeon/), [`Pigeon.xcodeproj`](Pigeon.xcodeproj)) lands the
+  OS-integration layer over the shared core: `KeychainKeyStore` (the `KeyStore`
+  over the iOS Keychain), `OsLogSink` (`LogSink` over `os_log`), `PhotoPicker`
+  (`PhotosPicker` → bytes for the core to encrypt+upload), and `SyncController`
+  (background-refresh-aware sync lifecycle). `PigeonApp` installs the three host
+  callbacks at launch, mirroring Android's `PigeonApp`. Run + test on macOS:
+
+  ```sh
+  ios/build-core.sh        # xcframework + bindings (if not already built)
+  ios/run-tests.sh         # build the app + run the Keychain suite on a simulator
+  ```
+
+  `KeychainKeyStoreTests` (7 tests) exercises the **real iOS Keychain** — the app
+  is ad-hoc signed with a `keychain-access-groups` entitlement so `SecItem`
+  works on the simulator. Wired into the macOS CI lane. **APNs push is blocked**
+  (no homeserver push contract — inherits M4.4).
 - **M5.4** — SwiftUI screens for the M1–M4 flows, driven by the shared core, to
   reach Android feature parity. No new core logic should be needed; any that is
   signals a leaky boundary to fix in the core for both platforms.

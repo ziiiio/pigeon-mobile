@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Keychain access group for the app. The KeychainKeyStore (M5.3) stores the
+	  session token + encrypted MLS device-state under kSecClassGenericPassword;
+	  a generic-password item needs the app signed with a keychain-access-group,
+	  otherwise SecItem returns errSecMissingEntitlement (-34018). On a normally
+	  provisioned device the app already gets an application-identifier group for
+	  free; this makes it explicit so the (ad-hoc-signed) simulator test build has
+	  it too. $(AppIdentifierPrefix) is the team prefix, empty for ad-hoc.
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.pigeon.mobile</string>
+	</array>
+</dict>
+</plist>
