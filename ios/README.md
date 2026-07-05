@@ -6,7 +6,7 @@ pickers). No protocol or crypto code is written in Swift — that all lives once
 the core, and reaches Swift through UniFFI-generated bindings. This mirrors how the
 Android app consumes the core through generated Kotlin.
 
-## Status (M5.1 — core packaged for Swift)
+## Status (M5.2 — core packaged for Swift + Hello-core runs on a simulator)
 
 - ✅ **Swift bindings generate cleanly** from the core. The full FFI surface comes
   through: `PigeonClient` (with its `async throws` methods), the records
@@ -42,15 +42,23 @@ run the script before opening the app.
 
 ## Next (M5.2 → M5.4, macOS-gated)
 
-- **M5.2** — a Hello-core SwiftUI smoke app calling `coreVersion()` /
-  `selfTestCrypto()` (the mirror of Android's M0.4), to prove the bindings load and
-  run on a simulator/device. **Reference source is written** in
-  [`HelloCore/`](HelloCore/) (`HelloCoreApp.swift` + `ContentView.swift`), with
-  every call matched to the generated Swift signatures. **To run it (macOS):**
-  `ios/build-core.sh`, then in Xcode create an iOS App target, add the `PigeonCore`
-  Swift package (`ios/PigeonCore`) as a dependency, add the two `HelloCore/*.swift`
-  files, and run on a simulator. It is **not compiled in the Linux dev container**
-  (no Xcode/Swift), so its on-device run is still pending a Mac.
+- ✅ **M5.2 — Hello-core smoke app (built + run on a simulator).** A SwiftUI app
+  ([`HelloCore/`](HelloCore/)) calling `coreVersion()` / `selfTestCrypto()` — the
+  mirror of Android's M0.4 — proving the bindings load and run on-device. It is
+  packaged by a checked-in Xcode project ([`HelloCore.xcodeproj`](HelloCore.xcodeproj),
+  hand-written so no `xcodegen`/`tuist` is needed) consuming the local `PigeonCore`
+  Swift package. **To build + run it (macOS):**
+
+  ```sh
+  ios/build-core.sh        # produce the xcframework + Swift bindings first
+  ios/run-hellocore.sh     # build the app, boot a simulator, run + assert
+  ```
+
+  `run-hellocore.sh` boots a simulator, installs, launches, and asserts from the
+  app's `os_log` output that the `LogSink` round-trips and both Rust-computed
+  values returned through the bindings. It backs the **macOS CI lane**. Verified
+  green on an `iPhone 16` simulator (iOS 18.4). Still **not runnable in the Linux
+  dev container** (no simulator) — that only generates the bindings.
 - **M5.3** — Apple OS integration: Keychain-backed `KeyStore`, `os_log`-backed
   `LogSink`, `PickVisualMedia`-style photo picker, background-refresh-aware sync.
   (APNs push mirrors Android's M4.4 and is **blocked** until the homeserver exposes

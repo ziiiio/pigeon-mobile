@@ -126,3 +126,12 @@ jobs:
       - name: build xcframework + Swift bindings
         working-directory: pigeon-mobile
         run: ios/build-core.sh
+
+      # M5.2 — build the Hello-core smoke app against the xcframework and run it
+      # on a simulator, asserting it renders the Rust-computed values and the
+      # os_log LogSink round-trips (the iOS mirror of Android's assembleDebug +
+      # emulator check). Fails the lane if the core→bindings→SwiftUI pipeline
+      # regresses on-device.
+      - name: build + run Hello-core on a simulator
+        working-directory: pigeon-mobile/ios
+        run: ./run-hellocore.sh

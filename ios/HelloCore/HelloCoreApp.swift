@@ -19,6 +19,20 @@ struct HelloCoreApp: App {
         // Android's PigeonApp does — it forwards core logs to the platform logger.
         setLogSink(sink: OsLogSink())
         emitTestLog(message: "HelloCore: log sink installed")
+
+        // Emit the two Rust-computed values through the sink as well, so the
+        // headless smoke run (run-hellocore.sh / the macOS CI lane) can assert
+        // the whole Rust → xcframework → UniFFI → Swift pipeline round-trips —
+        // not just that the app launched. Content-free (a version string + a
+        // key-length count, no secrets — CLAUDE.md Gotcha #2). The UI renders
+        // the same values independently in ContentView.
+        emitTestLog(message: "HelloCore: \(coreVersion())")
+        do {
+            let keyLen = try selfTestCrypto(userId: "@m5:test.example")
+            emitTestLog(message: "HelloCore: crypto self-test ok, key=\(keyLen) bytes")
+        } catch {
+            emitTestLog(message: "HelloCore: crypto self-test FAILED: \(error)")
+        }
     }
 
     var body: some Scene {

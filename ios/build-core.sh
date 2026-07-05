@@ -30,6 +30,12 @@ LIB_NAME="libpigeon_mobile_core.a"          # from crate-type = ["staticlib", â€
 PROFILE="${PROFILE:-release}"                 # debug|release; release for shipping
 CARGO_FLAG=$([ "$PROFILE" = release ] && echo "--release" || echo "")
 
+# Pin the Apple deployment-target floor so the compiled objects match the app's
+# minimum (and `PigeonCore/Package.swift`'s `.iOS(.v15)`). Without this, the
+# Rust/C objects inherit the installed SDK's default (e.g. iOS 26), and linking
+# an iOS-15 app against them spews "built for newer version" warnings.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}"
+
 # The Apple targets: a device slice (arm64) and a simulator slice (arm64 + x86_64
 # lipo'd into one fat lib, so the xcframework's simulator slice runs on both
 # Apple-Silicon and Intel Macs).
@@ -48,8 +54,10 @@ done
 echo "==> Generating the UniFFI Swift bindings"
 # Read the metadata from any built library (target-independent); this is the
 # exact step the Linux core lane runs to verify the Swift surface compiles.
-rm -rf "$PKG_SOURCES"
+# Clear only the generated binding (a git-ignored artifact); keep the tracked
+# `.gitkeep` so the SwiftPM target dir survives a clean checkout.
 mkdir -p "$PKG_SOURCES"
+rm -f "$PKG_SOURCES"/pigeon_mobile_core.swift
 cargo run --bin uniffi-bindgen -- generate \
   --library "target/$DEVICE_TARGET/$PROFILE/libpigeon_mobile_core.dylib" \
   --language swift \
