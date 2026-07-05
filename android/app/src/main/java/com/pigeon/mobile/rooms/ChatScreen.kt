@@ -1,6 +1,9 @@
 package com.pigeon.mobile.rooms
 
 import android.graphics.BitmapFactory
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -303,6 +306,7 @@ private fun TimelineRow(
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
             }
+            TimeLabel(event.originServerTs)
         }
         // A text message → a bubble aligned by sender.
         body != null -> Column(
@@ -332,15 +336,15 @@ private fun TimelineRow(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
-            // Send status for the user's own messages (M2.5).
+            // Send status for the user's own messages (M2.5) — else the time.
             val status = when {
                 event.failed -> stringResource(R.string.chat_not_sent)
                 event.pending -> stringResource(R.string.chat_sending)
                 else -> null
             }
-            status?.let {
+            if (status != null) {
                 Text(
-                    text = it,
+                    text = status,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (event.failed) {
                         MaterialTheme.colorScheme.error
@@ -349,6 +353,8 @@ private fun TimelineRow(
                     },
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
+            } else {
+                TimeLabel(event.originServerTs)
             }
         }
         // A state/membership event → a centered muted system line.
@@ -364,6 +370,24 @@ private fun TimelineRow(
         // Nothing renderable (hidden event type) — draw nothing.
         else -> Unit
     }
+}
+
+/** A small muted timestamp under a message (M4.5). Display-only formatting of the
+ * event's `origin_server_ts` (millis) — no protocol logic. */
+@Composable
+private fun TimeLabel(originServerTs: Long) {
+    if (originServerTs <= 0L) return
+    val text = remember(originServerTs) {
+        Instant.ofEpochMilli(originServerTs)
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("HH:mm"))
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 12.dp),
+    )
 }
 
 @Composable
