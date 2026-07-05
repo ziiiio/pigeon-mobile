@@ -144,3 +144,12 @@ jobs:
       - name: build + test the Pigeon app on a simulator
         working-directory: pigeon-mobile/ios
         run: ./run-tests.sh
+
+      # M5.4 — launch the real Pigeon app on a simulator and assert it boots into
+      # its SwiftUI UI (RootView → the M1–M4 screens) without crashing and that
+      # the core's host callbacks install at process start. run-tests.sh proves it
+      # compiles + unit-tests pass; this proves the app actually runs on-device
+      # (the iOS-specific risk beyond the core, which is e2e-tested separately).
+      - name: build + launch the Pigeon app on a simulator
+        working-directory: pigeon-mobile/ios
+        run: ./run-app.sh

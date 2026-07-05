@@ -6,7 +6,13 @@ pickers). No protocol or crypto code is written in Swift — that all lives once
 the core, and reaches Swift through UniFFI-generated bindings. This mirrors how the
 Android app consumes the core through generated Kotlin.
 
-## Status (M5.3 — core packaged for Swift, Hello-core runs, OS-integration layer built + tested)
+## Status (M5.4 — feature parity; the iOS app builds, tests, and launches on a simulator)
+
+**All of M5 is built and validated on a Mac (Xcode 26.6, iOS 26.5 simulator runtime).**
+Earlier notes below describe some steps as "macOS-gated / not runnable in the Linux
+dev container" — that gate only ever applied to the container; on a Mac with Xcode
+every step runs. The one genuine block is **APNs push**, which is a *server* gap
+(no push endpoint exists — see M5.3), not a toolchain one.
 
 - ✅ **Swift bindings generate cleanly** from the core. The full FFI surface comes
   through: `PigeonClient` (with its `async throws` methods), the records
@@ -76,9 +82,25 @@ run the script before opening the app.
   is ad-hoc signed with a `keychain-access-groups` entitlement so `SecItem`
   works on the simulator. Wired into the macOS CI lane. **APNs push is blocked**
   (no homeserver push contract — inherits M4.4).
-- **M5.4** — SwiftUI screens for the M1–M4 flows, driven by the shared core, to
-  reach Android feature parity. No new core logic should be needed; any that is
-  signals a leaky boundary to fix in the core for both platforms.
+- ✅ **M5.4 — feature parity (built + launched on a simulator).** SwiftUI screens
+  for the M1–M4 flows (`ios/Pigeon/Auth/` + `ios/Pigeon/Rooms/`), driven entirely
+  by the shared core — auth/session, room list + create/join (plaintext + E2EE),
+  timeline + send/receive (encryption transparent), media (photo pick → core
+  encrypt+upload; inline download+decrypt), invite, and key backup/restore. No new
+  core logic was needed — the FFI boundary held (zero protocol/crypto in Swift).
 
-These require Xcode (Swift compiler + `xcodebuild` + a simulator), so they are
-built and validated on macOS, not in the Linux dev container.
+  ```sh
+  ios/build-core.sh        # xcframework + bindings (if not already built)
+  ios/run-tests.sh         # build the app + run the 12 unit tests (AuthError + Keychain)
+  ios/run-app.sh           # launch the app on a simulator + assert it boots into the UI
+  ```
+
+  `run-app.sh` boots a simulator, installs, launches the real app, and asserts
+  from `os_log` that the core callbacks installed (`PigeonApp: core callbacks
+  installed`) and the app reached and held its SwiftUI UI without crashing — the
+  iOS "the app runs" gate (the full login→send flow against a live homeserver is
+  covered by the **core's e2e suite**; iOS drives the identical FFI as Android).
+  Wired into the macOS CI lane. APNs push stays blocked (no server contract).
+
+These steps need Xcode (Swift compiler + `xcodebuild` + a simulator); they run on
+macOS (a developer Mac or the macOS CI lane), not in the Linux dev container.

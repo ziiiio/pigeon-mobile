@@ -29,14 +29,19 @@ import PigeonCore
 final class SyncController {
     private var client: PigeonClient?
     private var observer: SyncObserver?
+    private var onEnded: ((Error) -> Void)?
     private var isActive = false
     private var task: Task<Void, Never>?
 
     /// Provide (or clear, with `nil`) the logged-in client and the observer that
     /// receives sync diffs. Clearing the client stops the loop (e.g. on logout).
-    func setClient(_ client: PigeonClient?, observer: SyncObserver?) {
+    /// `onEnded` is called if the loop ends with a *fatal* error (not a normal
+    /// background cancellation) — e.g. a revoked token — so the UI can react
+    /// (mirrors Android's `onSyncFailed`).
+    func setClient(_ client: PigeonClient?, observer: SyncObserver?, onEnded: ((Error) -> Void)? = nil) {
         self.client = client
         self.observer = observer
+        self.onEnded = onEnded
         reconcile()
     }
 
@@ -55,6 +60,7 @@ final class SyncController {
             guard task == nil else { return } // already running
             let client = self.client!
             let observer = self.observer!
+            let onEnded = self.onEnded
             task = Task { [weak self] in
                 do {
                     // Long-running; returns only on cancellation or a fatal error.
@@ -62,7 +68,12 @@ final class SyncController {
                 } catch is CancellationError {
                     // Expected on background/teardown — nothing to surface.
                 } catch {
-                    emitTestLog(message: "sync loop ended: \(error)")
+                    // Fatal (e.g. revoked token). Report only if we weren't
+                    // cancelled (a cancelled Task also lands here on some paths).
+                    if !Task.isCancelled {
+                        emitTestLog(message: "sync loop ended: \(error)")
+                        onEnded?(error)
+                    }
                 }
                 // Clear our handle if this task is still the current one.
                 await self?.clearTaskIfCurrent()

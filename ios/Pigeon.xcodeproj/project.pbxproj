@@ -15,6 +15,15 @@
 		2000000000000000000035 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000025 /* RootView.swift */; };
 		2000000000000000000036 /* KeychainKeyStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000026 /* KeychainKeyStoreTests.swift */; };
 		2000000000000000000042 /* PigeonCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2000000000000000000041 /* PigeonCore */; };
+		2000000000000000000090 /* AuthError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000080 /* AuthError.swift */; };
+		2000000000000000000091 /* AuthViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000081 /* AuthViewModel.swift */; };
+		2000000000000000000092 /* AuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000082 /* AuthView.swift */; };
+		2000000000000000000093 /* RoomsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000083 /* RoomsViewModel.swift */; };
+		2000000000000000000094 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000084 /* ChatViewModel.swift */; };
+		2000000000000000000095 /* RoomSyncObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000085 /* RoomSyncObserver.swift */; };
+		2000000000000000000096 /* RoomListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000086 /* RoomListView.swift */; };
+		2000000000000000000097 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000087 /* ChatView.swift */; };
+		2000000000000000000098 /* AuthErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000088 /* AuthErrorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -38,6 +47,15 @@
 		2000000000000000000025 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		2000000000000000000026 /* KeychainKeyStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainKeyStoreTests.swift; sourceTree = "<group>"; };
 		2000000000000000000027 /* Pigeon.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Pigeon.entitlements; sourceTree = "<group>"; };
+		2000000000000000000080 /* AuthError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Auth/AuthError.swift"; sourceTree = "<group>"; };
+		2000000000000000000081 /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Auth/AuthViewModel.swift"; sourceTree = "<group>"; };
+		2000000000000000000082 /* AuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Auth/AuthView.swift"; sourceTree = "<group>"; };
+		2000000000000000000083 /* RoomsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Rooms/RoomsViewModel.swift"; sourceTree = "<group>"; };
+		2000000000000000000084 /* ChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Rooms/ChatViewModel.swift"; sourceTree = "<group>"; };
+		2000000000000000000085 /* RoomSyncObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Rooms/RoomSyncObserver.swift"; sourceTree = "<group>"; };
+		2000000000000000000086 /* RoomListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Rooms/RoomListView.swift"; sourceTree = "<group>"; };
+		2000000000000000000087 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Rooms/ChatView.swift"; sourceTree = "<group>"; };
+		2000000000000000000088 /* AuthErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AuthErrorTests.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -80,6 +98,14 @@
 		2000000000000000000004 /* Pigeon */ = {
 			isa = PBXGroup;
 			children = (
+				2000000000000000000080 /* AuthError.swift */,
+				2000000000000000000081 /* AuthViewModel.swift */,
+				2000000000000000000082 /* AuthView.swift */,
+				2000000000000000000083 /* RoomsViewModel.swift */,
+				2000000000000000000084 /* ChatViewModel.swift */,
+				2000000000000000000085 /* RoomSyncObserver.swift */,
+				2000000000000000000086 /* RoomListView.swift */,
+				2000000000000000000087 /* ChatView.swift */,
 				2000000000000000000020 /* PigeonApp.swift */,
 				2000000000000000000025 /* RootView.swift */,
 				2000000000000000000021 /* OsLogSink.swift */,
@@ -94,6 +120,7 @@
 		2000000000000000000005 /* PigeonTests */ = {
 			isa = PBXGroup;
 			children = (
+				2000000000000000000088 /* AuthErrorTests.swift */,
 				2000000000000000000026 /* KeychainKeyStoreTests.swift */,
 			);
 			path = PigeonTests;
@@ -205,6 +232,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2000000000000000000090 /* AuthError.swift in Sources */,
+				2000000000000000000091 /* AuthViewModel.swift in Sources */,
+				2000000000000000000092 /* AuthView.swift in Sources */,
+				2000000000000000000093 /* RoomsViewModel.swift in Sources */,
+				2000000000000000000094 /* ChatViewModel.swift in Sources */,
+				2000000000000000000095 /* RoomSyncObserver.swift in Sources */,
+				2000000000000000000096 /* RoomListView.swift in Sources */,
+				2000000000000000000097 /* ChatView.swift in Sources */,
 				2000000000000000000030 /* PigeonApp.swift in Sources */,
 				2000000000000000000035 /* RootView.swift in Sources */,
 				2000000000000000000031 /* OsLogSink.swift in Sources */,
@@ -218,6 +253,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2000000000000000000098 /* AuthErrorTests.swift in Sources */,
 				2000000000000000000036 /* KeychainKeyStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
