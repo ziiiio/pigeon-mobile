@@ -44,7 +44,13 @@ run the script before opening the app.
 
 - **M5.2** — a Hello-core SwiftUI smoke app calling `coreVersion()` /
   `selfTestCrypto()` (the mirror of Android's M0.4), to prove the bindings load and
-  run on a simulator/device.
+  run on a simulator/device. **Reference source is written** in
+  [`HelloCore/`](HelloCore/) (`HelloCoreApp.swift` + `ContentView.swift`), with
+  every call matched to the generated Swift signatures. **To run it (macOS):**
+  `ios/build-core.sh`, then in Xcode create an iOS App target, add the `PigeonCore`
+  Swift package (`ios/PigeonCore`) as a dependency, add the two `HelloCore/*.swift`
+  files, and run on a simulator. It is **not compiled in the Linux dev container**
+  (no Xcode/Swift), so its on-device run is still pending a Mac.
 - **M5.3** — Apple OS integration: Keychain-backed `KeyStore`, `os_log`-backed
   `LogSink`, `PickVisualMedia`-style photo picker, background-refresh-aware sync.
   (APNs push mirrors Android's M4.4 and is **blocked** until the homeserver exposes
