@@ -16,8 +16,13 @@ android/.gradle/
 android/.kotlin/
 android/build/
 android/app/build/
+# Stale build dirs a tool leaves when it can't delete `build/` in place.
+**/build.stale-root/
 android/local.properties
 android/.cxx/
+# Gradle Daemon JVM criteria — machine-local build infra (auto-provisions the
+# daemon's JVM); not shared. Delete/commit deliberately if you want it pinned.
+android/gradle/gradle-daemon-jvm.properties
 *.apk
 *.aab
 *.keystore
@@ -43,3 +48,7 @@ xcuserdata/
 .env.local
 # e2e (host/Docker-gated lane)
 e2e/target/
+
+# Claude Code — machine-local settings (the shared `.claude/settings.json`, if
+# any, stays committable; only the per-developer `.local` file is ignored).
+.claude/settings.local.json
