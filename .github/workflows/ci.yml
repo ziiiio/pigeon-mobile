@@ -48,6 +48,17 @@ jobs:
       - name: test
         working-directory: pigeon-mobile/core
         run: cargo test
+      # M5.1: the Swift bindings are platform-independent (read from the built
+      # library's metadata), so verify they generate on the Linux lane too — this
+      # guards the shared-core → Swift boundary without needing macOS.
+      - name: generate swift bindings (smoke)
+        working-directory: pigeon-mobile/core
+        run: |
+          cargo build
+          cargo run --bin uniffi-bindgen -- generate \
+            --library target/debug/libpigeon_mobile_core.so \
+            --language swift --out-dir target/bindings/swift
+          test -f target/bindings/swift/pigeon_mobile_core.swift
 
   # Android lane: cross-compile the core (cargo-ndk) and assemble the app. The
   # ubuntu runner is amd64, so the NDK's x86_64 toolchain runs natively (no
@@ -87,3 +98,31 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
         run: ./gradlew assembleDebug --stacktrace
+
+  # iOS lane (M5.1): cross-compile the core for the Apple targets, generate the
+  # Swift bindings, and package the xcframework. macOS-only — the iOS SDK is
+  # needed to link the Apple targets (incl. rusqlite's bundled SQLite) and
+  # `xcodebuild -create-xcframework` is macOS-only. The Linux `core` lane already
+  # smoke-checks that the Swift bindings *generate*; this lane proves they build.
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pigeon-mobile
+      - uses: actions/checkout@v4
+        with:
+          repository: your-org/pigeon
+          path: pigeon
+          # token: ${{ secrets.PIGEON_REPO_TOKEN }}   # if the repo is private
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pigeon-mobile/core
+
+      - name: build xcframework + Swift bindings
+        working-directory: pigeon-mobile
+        run: ios/build-core.sh

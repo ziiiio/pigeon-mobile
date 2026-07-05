@@ -1,0 +1,6 @@
+# iOS build artifacts (produced by build-core.sh on macOS) — not checked in,
+# same as Android's generated bindings + .so live under build/.
+build/
+PigeonCore/PigeonCoreFFI.xcframework/
+# The generated UniFFI Swift bindings (regenerated from the core each build).
+PigeonCore/Sources/PigeonCore/pigeon_mobile_core.swift
