@@ -184,6 +184,24 @@ impl E2ee {
 }
 
 impl E2ee {
+    /// Encrypt media bytes under a fresh random key (M4.2). Returns
+    /// `(key_b64, ciphertext)`: the base64 key to embed in the E2EE message event
+    /// (never uploaded), and the ciphertext blob to upload to the opaque media
+    /// store. Pure symmetric AEAD via `pigeon-crypto` — independent of the group,
+    /// so it needs no device state and can't fail on "no group".
+    pub fn encrypt_media(&self, plaintext: &[u8]) -> Result<(String, Vec<u8>), CoreError> {
+        let enc = pigeon_crypto::encrypt_media(plaintext)?;
+        Ok((STANDARD.encode(&enc.key), enc.ciphertext))
+    }
+
+    /// Decrypt media `ciphertext` (downloaded from the store) with the base64
+    /// `key_b64` carried in the E2EE event (M4.2). Wrong key / tampered bytes fail
+    /// cleanly.
+    pub fn decrypt_media(&self, key_b64: &str, ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {
+        let key = decode_wire(key_b64, "media key")?;
+        Ok(pigeon_crypto::decrypt_media(&key, ciphertext)?)
+    }
+
     /// Create an encrypted backup of this device's whole MLS state (M4.3), for
     /// upload to the server's key-backup store. Returns `(recovery_key, blob)`,
     /// both base64: the **recovery key** is the only restore secret (show it to

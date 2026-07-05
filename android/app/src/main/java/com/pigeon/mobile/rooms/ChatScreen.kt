@@ -54,6 +54,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.pigeon.mobile.R
 import kotlinx.coroutines.flow.StateFlow
+import uniffi.pigeon_mobile_core.ImageContent
 import uniffi.pigeon_mobile_core.PigeonClient
 import uniffi.pigeon_mobile_core.TimelineEvent
 
@@ -93,7 +94,7 @@ fun ChatRoute(
         onSend = vm::send,
         onInvite = vm::invite,
         onSendImage = vm::sendImage,
-        download = vm::downloadMedia,
+        download = vm::downloadImage,
     )
 }
 
@@ -109,12 +110,12 @@ fun ChatScreen(
     onSend: (String) -> Unit,
     onInvite: (String) -> Unit,
     onSendImage: (ByteArray, String, Int, Int) -> Unit,
-    download: suspend (String) -> ByteArray?,
+    download: suspend (ImageContent) -> ByteArray?,
 ) {
     val listState = rememberLazyListState()
     var showInvite by rememberSaveable { mutableStateOf(false) }
     // A tapped image, shown full-screen (M4.1).
-    var viewImage by remember { mutableStateOf<String?>(null) }
+    var viewImage by remember { mutableStateOf<ImageContent?>(null) }
 
     // Image picker (plaintext rooms only in M4.1). Reads the picked bytes, decodes
     // its dimensions, and hands them to the core to upload + send.
@@ -172,12 +173,10 @@ fun ChatScreen(
         bottomBar = {
             Composer(
                 onSend = onSend,
-                // Media attach is offered only in plaintext rooms in M4.1
-                // (encrypted media is M4.2); the core would refuse it otherwise.
-                onAttach = if (encrypted) {
-                    null
-                } else {
-                    { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                // Media attach works in both plaintext and encrypted rooms (M4.2):
+                // the core encrypts before upload for encrypted rooms.
+                onAttach = {
+                    pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
             )
         },
@@ -232,8 +231,8 @@ fun ChatScreen(
             },
         )
     }
-    viewImage?.let { uri ->
-        FullScreenImage(uri = uri, download = download, onDismiss = { viewImage = null })
+    viewImage?.let { img ->
+        FullScreenImage(image = img, download = download, onDismiss = { viewImage = null })
     }
 }
 
@@ -269,8 +268,8 @@ private fun InviteDialog(onDismiss: () -> Unit, onInvite: (String) -> Unit) {
 private fun TimelineRow(
     event: TimelineEvent,
     mine: Boolean,
-    download: suspend (String) -> ByteArray?,
-    onImageClick: (String) -> Unit,
+    download: suspend (ImageContent) -> ByteArray?,
+    onImageClick: (ImageContent) -> Unit,
 ) {
     val body = event.body
     val systemText = event.systemText
@@ -290,12 +289,12 @@ private fun TimelineRow(
                 )
             }
             RemoteImage(
-                uri = image.uri,
+                image = image,
                 download = download,
                 modifier = Modifier
                     .padding(horizontal = 8.dp)
                     .sizeIn(maxWidth = 240.dp, maxHeight = 240.dp)
-                    .clickable { onImageClick(image.uri) },
+                    .clickable { onImageClick(image) },
             )
             if (!body.isNullOrBlank()) {
                 Text(
@@ -406,15 +405,16 @@ private fun Composer(onSend: (String) -> Unit, onAttach: (() -> Unit)?) {
     }
 }
 
-/** Download media bytes for `uri` off the main thread, decode, and render. Shows
- * a spinner while loading and a placeholder if it can't be decoded (M4.1). */
+/** Download an image's bytes off the main thread (the core decrypts encrypted
+ * ones), decode, and render. Spinner while loading, placeholder if undecodable
+ * (M4.1/M4.2). */
 @Composable
 private fun RemoteImage(
-    uri: String,
-    download: suspend (String) -> ByteArray?,
+    image: ImageContent,
+    download: suspend (ImageContent) -> ByteArray?,
     modifier: Modifier = Modifier,
 ) {
-    val bytes by produceState<ByteArray?>(initialValue = null, uri) { value = download(uri) }
+    val bytes by produceState<ByteArray?>(initialValue = null, image.uri) { value = download(image) }
     val bitmap = remember(bytes) {
         bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
     }
@@ -439,8 +439,8 @@ private fun RemoteImage(
 /** Full-screen image viewer, dismissed by tapping anywhere (M4.1). */
 @Composable
 private fun FullScreenImage(
-    uri: String,
-    download: suspend (String) -> ByteArray?,
+    image: ImageContent,
+    download: suspend (ImageContent) -> ByteArray?,
     onDismiss: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -450,7 +450,7 @@ private fun FullScreenImage(
                 .clickable(onClick = onDismiss),
             contentAlignment = Alignment.Center,
         ) {
-            RemoteImage(uri = uri, download = download, modifier = Modifier.fillMaxWidth())
+            RemoteImage(image = image, download = download, modifier = Modifier.fillMaxWidth())
         }
     }
 }

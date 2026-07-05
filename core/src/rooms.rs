@@ -13,17 +13,23 @@ use crate::session::PigeonClient;
 use crate::store::{RoomSummary, SendState, StoredEvent};
 use crate::CoreError;
 
-/// An image attachment referenced by a timeline message (M4.1). The `uri` is a
-/// `pigeon://` content URI the UI resolves via [`PigeonClient::download_media`];
-/// `width`/`height`/`size` are `0` when unknown. The same record is the input to
-/// [`PigeonClient::send_image`].
+/// An image attachment on a timeline message (M4.1/M4.2). The UI resolves the
+/// bytes via [`PigeonClient::download_image`] (which decrypts when `key` is set).
+/// `width`/`height`/`size` are `0` when unknown.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ImageContent {
+    /// `pigeon://` content URI of the (possibly encrypted) bytes in the store.
     pub uri: String,
     pub mimetype: String,
     pub width: u32,
     pub height: u32,
     pub size: u64,
+    /// For an **encrypted** image (M4.2): the base64 per-file key needed to
+    /// decrypt the downloaded bytes. It arrived inside the E2EE'd message, so the
+    /// server never saw it. `None` for a plaintext-room image. The UI passes the
+    /// whole record to [`PigeonClient::download_image`] — the key never leaves the
+    /// core to do the actual decryption (Cardinal Rule).
+    pub key: Option<String>,
 }
 
 /// A room in the room list — folded current state from the store. The FFI record
@@ -93,20 +99,37 @@ pub struct TimelineEvent {
 impl From<StoredEvent> for TimelineEvent {
     fn from(ev: StoredEvent) -> Self {
         // An image message (`msgtype: p.image`) carries an attachment; `body` is
-        // the caption. Only surfaced for plaintext messages in M4.1 (encrypted
-        // media is M4.2).
+        // the caption. Two sources: a plaintext-room `p.room.message` (M4.1), or a
+        // decrypted `p.room.encrypted` whose plaintext is a `p.image` content JSON
+        // (M4.2 — the per-file key rides in `file.key`). `decrypted_image` holds
+        // the parsed encrypted-image content when applicable.
+        let decrypted_image = if ev.event_type == "p.room.encrypted" {
+            ev.decrypted
+                .as_deref()
+                .and_then(|pt| serde_json::from_str::<serde_json::Value>(pt).ok())
+                .filter(|v| v.get("msgtype").and_then(|m| m.as_str()) == Some("p.image"))
+        } else {
+            None
+        };
         let image = if ev.event_type == "p.room.message"
             && ev.content.get("msgtype").and_then(|v| v.as_str()) == Some("p.image")
         {
             parse_image(&ev.content)
         } else {
-            None
+            decrypted_image.as_ref().and_then(parse_image)
         };
         let body = match ev.event_type.as_str() {
             "p.room.message" => ev
                 .content
                 .get("body")
                 .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            // A decrypted encrypted image uses its content's caption as the body;
+            // a decrypted encrypted *text* message uses the plaintext as-is
+            // (handled below where `image` is None).
+            "p.room.encrypted" if decrypted_image.is_some() => decrypted_image
+                .as_ref()
+                .and_then(|v| v.get("body").and_then(|b| b.as_str()))
                 .map(str::to_owned),
             // An encrypted event renders as a normal message once decrypted; its
             // plaintext is cached in the store (M3.5, Gotcha #3). Our own sent
@@ -141,31 +164,45 @@ impl From<StoredEvent> for TimelineEvent {
     }
 }
 
-/// Extract an [`ImageContent`] from a `p.image` message's content (`url` +
-/// `info`), or `None` if the `url` is missing. Unknown dims/size default to 0.
+/// Extract an [`ImageContent`] from a `p.image` message's content, or `None` if
+/// there's no media URL. Handles both shapes: a **plaintext** image carries
+/// `url` + an `info` object (M4.1); an **encrypted** image carries a `file`
+/// object `{ url, key, mimetype, w, h, size }` (M4.2) — the `key` is the base64
+/// per-file decryption key the UI hands back to [`PigeonClient::download_image`].
+/// Unknown dims/size default to 0.
 fn parse_image(content: &serde_json::Value) -> Option<ImageContent> {
-    let uri = content.get("url").and_then(|v| v.as_str())?.to_owned();
-    let info = content.get("info");
-    let str_at = |key: &str| {
-        info.and_then(|i| i.get(key))
-            .and_then(|v| v.as_str())
-            .unwrap_or("application/octet-stream")
-            .to_owned()
+    // Encrypted-image `file` object takes precedence; else the plaintext `url`.
+    let file = content.get("file").filter(|f| f.is_object());
+    let (holder, key) = match &file {
+        // Encrypted: url + key live inside `file`.
+        Some(f) => (*f, f.get("key").and_then(|v| v.as_str()).map(str::to_owned)),
+        // Plaintext: url at the top level, metadata under `info`.
+        None => (content, None),
     };
-    let u32_at = |key: &str| {
-        info.and_then(|i| i.get(key))
+    let uri = holder.get("url").and_then(|v| v.as_str())?.to_owned();
+    // Metadata sits alongside the url for encrypted (`file`), or under `info` for
+    // plaintext. Look in `info` first, then the holder itself.
+    let info = content.get("info");
+    let meta_str = |k: &str| {
+        info.and_then(|i| i.get(k))
+            .or_else(|| holder.get(k))
+            .and_then(|v| v.as_str())
+    };
+    let meta_u64 = |k: &str| {
+        info.and_then(|i| i.get(k))
+            .or_else(|| holder.get(k))
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32
+            .unwrap_or(0)
     };
     Some(ImageContent {
         uri,
-        mimetype: str_at("mimetype"),
-        width: u32_at("w"),
-        height: u32_at("h"),
-        size: info
-            .and_then(|i| i.get("size"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        mimetype: meta_str("mimetype")
+            .unwrap_or("application/octet-stream")
+            .to_owned(),
+        width: meta_u64("w") as u32,
+        height: meta_u64("h") as u32,
+        size: meta_u64("size"),
+        key,
     })
 }
 
@@ -295,46 +332,88 @@ impl PigeonClient {
     }
 
     /// Download media bytes by `pigeon://` content URI (M4.1). Returns the raw
-    /// bytes (the caller decrypts them for encrypted media, M4.2).
+    /// stored bytes — for encrypted media that's ciphertext, so prefer
+    /// [`download_image`](PigeonClient::download_image), which decrypts.
     pub async fn download_media(&self, uri: String) -> Result<Vec<u8>, CoreError> {
         let (server, media_id) = crate::media::parse_content_uri(&uri)?;
         Ok(self.api.download_media(&server, &media_id).await?)
     }
 
-    /// Send an image message (`p.image`) referencing already-uploaded media
-    /// (M4.1). `caption` is optional display text (the message `body`).
-    ///
-    /// **Plaintext rooms only in M4.1:** sending media to an *encrypted* room is
-    /// refused, because the uploaded bytes are not yet client-encrypted — sending
-    /// their URI would leak the image to the server. Encrypted media is M4.2.
+    /// Download an image's displayable bytes (M4.1/M4.2): fetch the stored bytes
+    /// and, if the image is encrypted (`image.key` set), decrypt them **in the
+    /// core** with `pigeon-crypto` (the key never leaves the core to do the AEAD —
+    /// Cardinal Rule). Plaintext images are returned as-is.
+    pub async fn download_image(&self, image: ImageContent) -> Result<Vec<u8>, CoreError> {
+        let bytes = self.download_media(image.uri).await?;
+        match image.key {
+            Some(key) => self.e2ee()?.decrypt_media(&key, &bytes),
+            None => Ok(bytes),
+        }
+    }
+
+    /// Send an image (M4.1/M4.2). Takes the **raw file bytes** and does everything
+    /// in the core: for a **plaintext** room it uploads the bytes and sends a
+    /// `p.image` message referencing the `pigeon://` URL; for an **encrypted**
+    /// room it encrypts the bytes under a fresh per-file key, uploads the
+    /// *ciphertext*, and sends a `p.image` content — carrying the URL **and the
+    /// per-file key** — inside an E2EE'd `p.room.encrypted` message, so the server
+    /// only ever stores ciphertext (Gotcha #1). `caption` is optional display text.
+    /// Oversize files are rejected client-side (typed limit error).
     pub async fn send_image(
         &self,
         room_id: String,
-        image: ImageContent,
+        bytes: Vec<u8>,
+        mimetype: String,
+        width: u32,
+        height: u32,
         caption: String,
     ) -> Result<(), CoreError> {
-        if let Some(e2ee) = self.e2ee.as_ref() {
-            if e2ee.has_group(&room_id)? {
-                return Err(CoreError::Crypto {
-                    reason: "sending media to an encrypted room is not supported yet (M4.2)"
-                        .to_owned(),
-                });
-            }
+        let size = bytes.len() as u64;
+        // Encrypt-and-send iff this is a room whose MLS group we hold.
+        let encrypt = match self.e2ee.as_ref() {
+            Some(e2ee) => e2ee.has_group(&room_id)?,
+            None => false,
+        };
+
+        if encrypt {
+            let e2ee = self.e2ee()?;
+            let (key_b64, ciphertext) = e2ee.encrypt_media(&bytes)?;
+            // Upload the ciphertext (opaque); its content-type is generic.
+            let uri = self
+                .upload_media(ciphertext, "application/octet-stream".to_owned())
+                .await?;
+            // The p.image content carries the URL + the per-file key in a `file`
+            // object; this whole content is then MLS-encrypted, so the key is only
+            // visible to the room's members.
+            let content = serde_json::json!({
+                "msgtype": "p.image",
+                "body": caption,
+                "file": {
+                    "url": uri,
+                    "key": key_b64,
+                    "mimetype": mimetype,
+                    "w": width,
+                    "h": height,
+                    "size": size,
+                },
+            });
+            let ciphertext_b64 = e2ee.encrypt(&room_id, &content.to_string())?;
+            let event = serde_json::json!({ "algorithm": "p.mls.1", "ciphertext": ciphertext_b64 });
+            self.api
+                .send_event(&room_id, "p.room.encrypted", &next_txn_id(), &event)
+                .await?;
+        } else {
+            let uri = self.upload_media(bytes, mimetype.clone()).await?;
+            let content = serde_json::json!({
+                "msgtype": "p.image",
+                "body": caption,
+                "url": uri,
+                "info": { "mimetype": mimetype, "w": width, "h": height, "size": size },
+            });
+            self.api
+                .send_event(&room_id, "p.room.message", &next_txn_id(), &content)
+                .await?;
         }
-        let content = serde_json::json!({
-            "msgtype": "p.image",
-            "body": caption,
-            "url": image.uri,
-            "info": {
-                "mimetype": image.mimetype,
-                "w": image.width,
-                "h": image.height,
-                "size": image.size,
-            },
-        });
-        self.api
-            .send_event(&room_id, "p.room.message", &next_txn_id(), &content)
-            .await?;
         Ok(())
     }
 
@@ -664,6 +743,134 @@ mod tests {
         ));
         assert!(te.image.is_none());
         assert_eq!(te.body.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn decrypted_encrypted_image_renders_with_its_file_key() {
+        // A p.room.encrypted event whose decrypted plaintext is a p.image content
+        // with a `file` object → an image attachment carrying the per-file key.
+        let mut ev = stored(
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": "CT" }),
+        );
+        ev.decrypted = Some(
+            json!({
+                "msgtype": "p.image", "body": "secret.png",
+                "file": { "url": "pigeon://s/ct1", "key": "a2V5", "mimetype": "image/png", "w": 4, "h": 3, "size": 9 }
+            })
+            .to_string(),
+        );
+        let te = TimelineEvent::from(ev);
+        assert_eq!(te.body.as_deref(), Some("secret.png")); // caption
+        let img = te.image.expect("an image attachment");
+        assert_eq!(img.uri, "pigeon://s/ct1");
+        assert_eq!(img.key.as_deref(), Some("a2V5")); // the per-file decryption key
+        assert_eq!(img.mimetype, "image/png");
+        assert_eq!(img.width, 4);
+    }
+
+    #[test]
+    fn decrypted_encrypted_text_is_not_mistaken_for_an_image() {
+        // A decrypted text message stays a plain body (no `image`), even though the
+        // encrypted-image detection parses the plaintext as JSON.
+        let mut ev = stored(
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": "CT" }),
+        );
+        ev.decrypted = Some("just a normal message".to_owned());
+        let te = TimelineEvent::from(ev);
+        assert!(te.image.is_none());
+        assert_eq!(te.body.as_deref(), Some("just a normal message"));
+    }
+
+    // Full encrypted-image path: send into an encrypted room (encrypt+upload+send
+    // via mock HTTP), then confirm the round-trip through decrypt+download. Uses
+    // two real MLS engines so the crypto is genuine, not mocked.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn encrypted_image_round_trips_send_to_display() {
+        use crate::e2ee::E2ee;
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@alice:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(&server)
+            .await;
+        let alice = crate::session::login(server.uri(), "alice".into(), "p".into())
+            .await
+            .unwrap();
+
+        // Alice hosts an encrypted group; Bob joins so he can decrypt.
+        alice.e2ee().unwrap().create_group("!enc:s").unwrap();
+        let bob = E2ee::create("@bob:s").unwrap();
+        let bob_kp = bob.key_packages(1).unwrap().remove(0);
+        let welcome = alice.e2ee().unwrap().add_member("!enc:s", &bob_kp).unwrap();
+        bob.join_from_welcome(&welcome).unwrap();
+
+        // Capture the ciphertext the upload receives so we can serve it back.
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/media/v1/upload"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "content_uri": "pigeon://s/ct1" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.encrypted/.+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$e" })))
+            .mount(&server)
+            .await;
+
+        let photo = b"\x89PNG the actual pixels".to_vec();
+        alice
+            .send_image(
+                "!enc:s".into(),
+                photo.clone(),
+                "image/png".into(),
+                4,
+                3,
+                "pic".into(),
+            )
+            .await
+            .expect("send encrypted image");
+
+        // Pull the encrypted event + the uploaded ciphertext back out of the mock.
+        let reqs = server.received_requests().await.unwrap();
+        let uploaded = reqs
+            .iter()
+            .find(|r| r.url.path() == "/_pigeon/media/v1/upload")
+            .unwrap()
+            .body
+            .clone();
+        let event_body: serde_json::Value = serde_json::from_slice(
+            &reqs
+                .iter()
+                .find(|r| r.url.path().contains("/send/p.room.encrypted/"))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        let ciphertext_b64 = event_body["ciphertext"].as_str().unwrap();
+
+        // Bob decrypts the message → a p.image content with url + per-file key.
+        let plaintext = bob.decrypt("!enc:s", ciphertext_b64).unwrap();
+        let content: serde_json::Value = serde_json::from_str(&plaintext).unwrap();
+        assert_eq!(content["msgtype"], "p.image");
+        let img = parse_image(&content).expect("image content");
+        assert_eq!(img.uri, "pigeon://s/ct1");
+        let file_key = img.key.expect("encrypted image carries a file key");
+
+        // Bob decrypts the uploaded ciphertext with that key → the original photo.
+        let recovered = bob.decrypt_media(&file_key, &uploaded).unwrap();
+        assert_eq!(recovered, photo, "the image round-trips through E2EE media");
     }
 
     // --- Encrypted event rendering (M3.5) ------------------------------------

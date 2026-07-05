@@ -124,25 +124,17 @@ class ChatViewModel(
     }
 
     /**
-     * Attach an image (M4.1): upload the bytes, then send a `p.image` message
-     * referencing the resulting media URI. Both steps run in the core (the URI is
-     * a `pigeon://` handle). Plaintext rooms only — the core refuses encrypted
-     * rooms (encrypted media is M4.2). The image appears once the sync loop
-     * delivers it.
+     * Attach an image (M4.1/M4.2): hand the raw bytes to the core, which uploads
+     * and sends the right message for the room — a `p.image` in a plaintext room,
+     * or (for an encrypted room) an encrypted-then-uploaded blob with the per-file
+     * key carried inside the E2EE'd message. All crypto/protocol stays in the core.
+     * The image appears once the sync loop delivers it.
      */
     fun sendImage(bytes: ByteArray, mimetype: String, width: Int, height: Int) {
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val uri = client.uploadMedia(bytes, mimetype)
-                    val image = ImageContent(
-                        uri = uri,
-                        mimetype = mimetype,
-                        width = width.toUInt(),
-                        height = height.toUInt(),
-                        size = bytes.size.toULong(),
-                    )
-                    client.sendImage(roomId, image, "")
+                    client.sendImage(roomId, bytes, mimetype, width.toUInt(), height.toUInt(), "")
                 }
             } catch (e: CoreException) {
                 _state.value = _state.value.copy(error = e.message)
@@ -151,11 +143,12 @@ class ChatViewModel(
         }
     }
 
-    /** Download media bytes by `pigeon://` URI for inline rendering (M4.1); `null`
-     * on failure (offline / gone). Off the main thread. */
-    suspend fun downloadMedia(uri: String): ByteArray? =
+    /** Download an image's displayable bytes for inline rendering (M4.1/M4.2);
+     * the core decrypts encrypted images (the key never leaves it). `null` on
+     * failure (offline / gone). Off the main thread. */
+    suspend fun downloadImage(image: ImageContent): ByteArray? =
         try {
-            withContext(Dispatchers.IO) { client.downloadMedia(uri) }
+            withContext(Dispatchers.IO) { client.downloadImage(image) }
         } catch (_: CoreException) {
             null
         }

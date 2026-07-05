@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 
 use pigeon_mobile_core::api::{Api, ErrorCode};
 use pigeon_mobile_core::e2ee::E2ee;
-use pigeon_mobile_core::rooms::ImageContent;
 use pigeon_mobile_core::session;
 use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
@@ -790,9 +789,19 @@ async fn download_media_rejects_a_malformed_uri() {
 }
 
 #[tokio::test]
-async fn send_image_posts_a_p_image_message() {
+async fn send_image_uploads_bytes_then_posts_a_p_image_message() {
     let server = MockServer::start().await;
     let client = logged_in(&server).await;
+    // In a plaintext room, send_image uploads the raw bytes then references the
+    // returned URL in a p.image message (no encryption).
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/media/v1/upload"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "content_uri": "pigeon://test.example/mediaABC" })),
+        )
+        .mount(&server)
+        .await;
     Mock::given(method("PUT"))
         .and(path_regex(
             r"^/_pigeon/client/v1/rooms/!r:test\.example/send/p\.room\.message/.+$",
@@ -811,13 +820,10 @@ async fn send_image_posts_a_p_image_message() {
     client
         .send_image(
             "!r:test.example".into(),
-            ImageContent {
-                uri: "pigeon://test.example/mediaABC".into(),
-                mimetype: "image/png".into(),
-                width: 4,
-                height: 3,
-                size: 99,
-            },
+            b"\x89PNG rawbytes".to_vec(),
+            "image/png".into(),
+            4,
+            3,
             "cat.jpg".into(),
         )
         .await
@@ -840,7 +846,7 @@ async fn upload_media_rejects_oversize_client_side() {
 }
 
 #[tokio::test]
-async fn send_image_refuses_encrypted_rooms_in_m4_1() {
+async fn send_image_in_encrypted_room_encrypts_bytes_and_carries_key_in_event() {
     let server = MockServer::start().await;
     let client = logged_in(&server).await;
     Mock::given(method("POST"))
@@ -855,24 +861,71 @@ async fn send_image_refuses_encrypted_rooms_in_m4_1() {
         .await
         .expect("create encrypted room");
 
-    // Media to an encrypted room is refused (plaintext bytes would leak) — M4.2.
-    match client
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/media/v1/upload"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "content_uri": "pigeon://test.example/ct1" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The message must be p.room.encrypted (ciphertext only) — NOT p.image.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_pigeon/client/v1/rooms/!enc:test\.example/send/p\.room\.encrypted/.+$",
+        ))
+        .and(body_partial_json(json!({ "algorithm": "p.mls.1" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$enc" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let plaintext_bytes = b"\x89PNG the secret photo".to_vec();
+    client
         .send_image(
             room,
-            ImageContent {
-                uri: "pigeon://test.example/x".into(),
-                mimetype: "image/png".into(),
-                width: 1,
-                height: 1,
-                size: 1,
-            },
+            plaintext_bytes.clone(),
+            "image/png".into(),
+            4,
+            3,
             "secret.png".into(),
         )
         .await
-    {
-        Err(CoreError::Crypto { .. }) => {}
-        other => panic!("expected a Crypto refusal for encrypted-room media, got {other:?}"),
-    }
+        .expect("send encrypted image ok");
+
+    let requests = server.received_requests().await.unwrap();
+    // What was uploaded is ciphertext, never the plaintext image bytes.
+    let upload = requests
+        .iter()
+        .find(|r| r.url.path() == "/_pigeon/media/v1/upload")
+        .expect("an upload was made");
+    assert_ne!(
+        upload.body, plaintext_bytes,
+        "the uploaded bytes must be ciphertext, not the plaintext image"
+    );
+    // The message on the wire is encrypted ciphertext — no plaintext caption/url.
+    let send = requests
+        .iter()
+        .find(|r| r.url.path().contains("/send/p.room.encrypted/"))
+        .expect("an encrypted send was made");
+    let body = String::from_utf8_lossy(&send.body);
+    assert!(body.contains("ciphertext"));
+    assert!(
+        !body.contains("secret.png"),
+        "no plaintext caption on the wire"
+    );
+    assert!(
+        !body.contains("pigeon://test.example/ct1"),
+        "no plaintext url on the wire"
+    );
+    // And crucially there is no p.room.message (p.image) leak.
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.url.path().contains("/send/p.room.message/")),
+        "an encrypted-room image must not send a plaintext p.image message"
+    );
 }
 
 #[tokio::test]
