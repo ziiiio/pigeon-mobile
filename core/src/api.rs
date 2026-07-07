@@ -312,7 +312,7 @@ impl Api {
         let packages: Vec<Value> = key_packages_b64
             .iter()
             .enumerate()
-            .map(|(i, pkg)| json!({ "key_id": format!("kp-{i}"), "package": pkg }))
+            .map(|(i, pkg)| json!({ "key_id": key_package_id(pkg, i), "package": pkg }))
             .collect();
         let body = json!({
             "device_keys": {
@@ -551,6 +551,24 @@ fn json_string(body: &Value, key: &str) -> Result<String, ApiError> {
         })
 }
 
+/// A content-addressed `key_id` for an uploaded KeyPackage (finding P5). The
+/// server dedups uploads on `(user, device, key_id)` with `ON CONFLICT DO
+/// NOTHING`, so a fixed `kp-{index}` scheme meant that *republishing* after an
+/// identity change (e.g. `restore_backup` mints a fresh device identity) reused
+/// `kp-0..` and was silently dropped in favour of the stale packages — peers
+/// then claimed KeyPackages of the discarded identity, whose Welcome could never
+/// be joined. Hashing the package makes re-uploading the same bytes idempotent
+/// while every *new* package gets a fresh id. `index` is only a fallback if
+/// hashing somehow fails (it doesn't, for a string).
+fn key_package_id(package_b64: &str, index: usize) -> String {
+    pigeon_core::hash::content_hash(&json!(package_b64))
+        .map(|h| {
+            let hex: String = h.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            format!("kp-{hex}")
+        })
+        .unwrap_or_else(|_| format!("kp-{index}"))
+}
+
 /// Extract the three `AuthResponse` fields from a `register`/`login` 2xx body.
 /// Pure — unit-tested without a server. A missing field is a protocol mismatch
 /// (`Malformed`), not a server error.
@@ -574,6 +592,15 @@ fn parse_auth(body: &Value) -> Result<AuthResponse, ApiError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn key_package_id_is_content_addressed() {
+        // Same bytes → same id (a re-upload dedups); different bytes → different
+        // id (a fresh identity's packages aren't dropped as duplicates — P5).
+        assert_eq!(key_package_id("AAAApkg", 0), key_package_id("AAAApkg", 3));
+        assert_ne!(key_package_id("pkg-one", 0), key_package_id("pkg-two", 0));
+        assert!(key_package_id("anything", 0).starts_with("kp-"));
+    }
 
     #[test]
     fn known_error_codes_round_trip() {
