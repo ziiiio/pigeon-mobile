@@ -73,6 +73,15 @@ impl PigeonClient {
                     // at-least-once delivery (Gotcha #8). Do this BEFORE decrypt
                     // so a Welcome and the first message in the same batch work.
                     let joined = apply_to_device(self, &resp);
+                    // Advance the token only NOW — after timeline folding and
+                    // to-device processing. The composite token also acks the
+                    // to-device position (the server then deletes acked Welcomes),
+                    // so persisting it before a Welcome is folded into MLS state
+                    // would lose that Welcome on a crash between the two, leaving
+                    // the room permanently undecryptable (finding P2). Both steps
+                    // above are idempotent, so a redelivery after a pre-ack crash
+                    // is safe.
+                    persist_sync_token(self, &resp)?;
                     // Decrypt any newly-arrived encrypted events and cache their
                     // plaintext (M3.5) before signalling — so the UI re-reads
                     // plaintext, not pending ciphertext.
@@ -107,9 +116,13 @@ impl PigeonClient {
 }
 
 /// Fold one `/sync` response into the store: append every joined room's timeline
-/// events (idempotently, in one transaction) and advance the stored token.
-/// Returns whether any new event landed (so the caller can skip a no-op refresh).
-/// Pure over the store — no network — so it is unit-tested directly.
+/// events (idempotently, in one transaction). Returns whether any new event
+/// landed (so the caller can skip a no-op refresh). Pure over the store — no
+/// network — so it is unit-tested directly.
+///
+/// Does **not** advance the sync token — [`persist_sync_token`] does that, and
+/// `run_sync` calls it only *after* to-device processing, so the composite
+/// token never acks a Welcome we haven't yet folded (finding P2).
 fn apply_sync(client: &PigeonClient, resp: &Value) -> Result<bool, CoreError> {
     // Flatten every joined room's timeline into one batch. Each event carries
     // its own `room_id`, so the store routes them without the room key here.
@@ -123,13 +136,20 @@ fn apply_sync(client: &PigeonClient, resp: &Value) -> Result<bool, CoreError> {
     }
 
     let inserted = client.store.apply_events(&events)?;
+    Ok(inserted > 0)
+}
 
-    // Advance the cursor. Persist verbatim even when the batch was empty — the
-    // server may still move the position forward (Gotcha #5: never synthesise).
+/// Advance the stored cursor to the response's `next_batch`, verbatim (Gotcha
+/// #5: never synthesise). Persist even on an empty batch — the position may
+/// still have moved. Called **last** in a sync cycle, after timeline folding and
+/// to-device processing, so acking the composite token never discards a Welcome
+/// (or any to-device message) we haven't durably applied yet (finding P2). Every
+/// step it gates is idempotent, so a redelivery after a pre-ack crash is safe.
+fn persist_sync_token(client: &PigeonClient, resp: &Value) -> Result<(), CoreError> {
     if let Some(next) = resp["next_batch"].as_str() {
         client.store.save_sync_token(next)?;
     }
-    Ok(inserted > 0)
+    Ok(())
 }
 
 /// Process the `to_device.events` block of a `/sync` response (M3.3): join any
@@ -256,6 +276,10 @@ mod tests {
             ]),
         );
         assert!(apply_sync(&client, &resp).unwrap());
+        // apply_sync no longer advances the token on its own (P2): the token is
+        // acked separately, after to-device processing.
+        assert_eq!(client.store.load_sync_token().unwrap(), None);
+        persist_sync_token(&client, &resp).unwrap();
         assert_eq!(
             client.store.load_sync_token().unwrap().as_deref(),
             Some("10_0")
@@ -285,6 +309,7 @@ mod tests {
         let empty = json!({ "next_batch": "7_2", "rooms": { "join": {} } });
         assert!(!apply_sync(&client, &empty).unwrap());
         // Token advances even with no events — the position may have moved.
+        persist_sync_token(&client, &empty).unwrap();
         assert_eq!(
             client.store.load_sync_token().unwrap().as_deref(),
             Some("7_2")
