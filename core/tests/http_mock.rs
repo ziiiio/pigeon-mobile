@@ -437,6 +437,83 @@ async fn send_message_marks_echo_failed_on_server_rejection() {
     assert!(!tl[0].pending);
 }
 
+/// A `p.room.encryption` state event (the E2EE marker), for seeding an
+/// encrypted room via a sync batch.
+fn encryption_marker(id: &str, room: &str) -> serde_json::Value {
+    json!({
+        "event_id": id, "room_id": room, "sender": "@alice:test.example",
+        "type": "p.room.encryption", "state_key": "", "origin_server_ts": 100,
+        "depth": 1, "content": { "algorithm": "p.mls.1" }
+    })
+}
+
+#[tokio::test]
+async fn send_into_an_encrypted_room_without_a_group_is_held_not_downgraded() {
+    // The P1 regression guard: a message queued for an encrypted room we hold no
+    // MLS group for must be HELD, never sent as plaintext.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(auth_body()))
+        .mount(&server)
+        .await;
+    // Every /sync folds a `p.room.encryption` marker so the store flags the room
+    // encrypted. NOTE: no /send route is mounted — if the client wrongly
+    // attempted a plaintext send it would 404 and the echo would be marked
+    // *failed*; we assert it stays *pending*, proving the send was held.
+    Mock::given(method("GET"))
+        .and(path("/_pigeon/client/v1/sync"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sync_body(
+            "1_0",
+            "!enc:test.example",
+            json!([encryption_marker("$enc", "!enc:test.example")]),
+        )))
+        .mount(&server)
+        .await;
+
+    let client = session::login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+
+    // Drive one sync to fold the encryption marker into the store.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        client.run_sync(Box::new(Recorder::default())),
+    )
+    .await;
+    assert!(
+        client
+            .list_rooms()
+            .expect("list_rooms ok")
+            .iter()
+            .any(|r| r.room_id == "!enc:test.example" && r.encrypted),
+        "the room must be flagged encrypted after the sync",
+    );
+
+    // E2EE isn't set up in this login mock, so a naive send would downgrade to
+    // plaintext. It must not: the send is held for the (not-yet-joined) group.
+    client
+        .send_message("!enc:test.example".into(), "top secret".into())
+        .await
+        .expect("send_message returns ok (the echo is queued)");
+
+    let tl = client
+        .timeline("!enc:test.example".into(), 10, None)
+        .expect("timeline ok");
+    let echo = tl
+        .iter()
+        .find(|e| e.body.as_deref() == Some("top secret"))
+        .expect("the local echo should be present");
+    assert!(
+        echo.pending,
+        "the message must stay pending (held for encryption)",
+    );
+    assert!(
+        !echo.failed,
+        "the message must NOT be marked failed — it was never attempted in the clear",
+    );
+}
+
 // --- Invite (M2.6) --------------------------------------------------------
 
 #[tokio::test]

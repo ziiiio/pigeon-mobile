@@ -449,6 +449,22 @@ impl Store {
         }
     }
 
+    /// Whether `room_id` is flagged end-to-end encrypted — a `p.room.encryption`
+    /// state event has been folded into current state (mirrors the `encrypted`
+    /// column of [`list_rooms`](Store::list_rooms)). Used on the send path to
+    /// refuse a plaintext downgrade when the room is encrypted but we hold no MLS
+    /// group yet (Gotcha #1 — never leak plaintext into an E2EE room).
+    pub fn is_room_encrypted(&self, room_id: &str) -> Result<bool, StoreError> {
+        let guard = self.lock();
+        let encrypted: i64 = guard.query_row(
+            "SELECT EXISTS(SELECT 1 FROM room_state
+                            WHERE room_id = ?1 AND type = 'p.room.encryption')",
+            rusqlite::params![room_id],
+            |r| r.get(0),
+        )?;
+        Ok(encrypted != 0)
+    }
+
     // --- Outbound send queue + local echo (M2.5) -----------------------------
 
     /// Queue an outbound message: write a provisional local echo into the
@@ -1076,6 +1092,33 @@ mod tests {
         assert_eq!(rooms[1].room_id, "!b:s");
         assert_eq!(rooms[1].name, None);
         assert!(rooms[1].encrypted);
+    }
+
+    #[test]
+    fn is_room_encrypted_reflects_the_marker() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_events(&[
+                // Plaintext room: just a message.
+                message("$p_m", "!plain:s", "@u:s", 1, 100, "hi"),
+                // Encrypted room: carries a p.room.encryption marker.
+                event(
+                    "$e_e",
+                    "!enc:s",
+                    "@u:s",
+                    1,
+                    100,
+                    "p.room.encryption",
+                    Some(""),
+                    json!({ "algorithm": "p.mls.1" }),
+                ),
+            ])
+            .unwrap();
+
+        assert!(store.is_room_encrypted("!enc:s").unwrap());
+        assert!(!store.is_room_encrypted("!plain:s").unwrap());
+        // A room we've never seen isn't encrypted (and doesn't error).
+        assert!(!store.is_room_encrypted("!unknown:s").unwrap());
     }
 
     #[test]

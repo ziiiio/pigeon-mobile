@@ -503,10 +503,32 @@ impl PigeonClient {
                     "p.room.encrypted",
                     serde_json::json!({ "algorithm": "p.mls.1", "ciphertext": ciphertext }),
                 ),
-                Ok(None) => (
-                    "p.room.message",
-                    serde_json::json!({ "body": send.body, "msgtype": "p.text" }),
-                ),
+                Ok(None) => {
+                    // No MLS group for this room. If the room is *encrypted* we
+                    // must NOT downgrade to plaintext — leave the send queued so
+                    // it goes out encrypted once the group's Welcome arrives (a
+                    // later sync). Deciding on group-presence alone (the old
+                    // behaviour) leaked the body into an E2EE room when we were
+                    // joined but hadn't processed the Welcome yet. Never logs the
+                    // body (Gotcha #2). Only a genuinely plaintext room falls
+                    // through to `p.room.message`.
+                    if self.store.is_room_encrypted(&send.room_id)? {
+                        crate::emit(
+                            crate::LogLevel::Warn,
+                            "e2ee",
+                            &format!(
+                                "holding a queued message for encrypted room {} — \
+                                 no MLS group yet; will send once the group is joined",
+                                send.room_id
+                            ),
+                        );
+                        continue;
+                    }
+                    (
+                        "p.room.message",
+                        serde_json::json!({ "body": send.body, "msgtype": "p.text" }),
+                    )
+                }
                 // Encryption failed (shouldn't happen if we hold the group): fail
                 // this send terminally so it doesn't wedge the queue, and move on.
                 Err(err) => {
