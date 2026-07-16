@@ -146,20 +146,31 @@ core/                       # pigeon-mobile-core — the shared Rust crate (the 
     lib.rs                  # UniFFI scaffolding + top-level FFI surface + logging
     api.rs                  # the Client–Server HTTP client (reqwest/rustls)
     session.rs              # register/login/restore/logout + keystore persistence
+    store.rs                # the offline-first local SQLite store (source of truth for reads)
+    sync.rs                 # the /sync long-poll loop + store folding
+    rooms.rs                # room list, timeline, send, invite (the messaging FFI)
+    e2ee.rs                 # the MLS engine bridge to pigeon-crypto (the only crypto path)
+    keys.rs                 # device-key query/claim for group establishment
+    media.rs                # media upload/download (plaintext + encrypted)
     bin/uniffi-bindgen.rs   # the binding generator (pinned to the uniffi dep)
   Cargo.toml                # path-deps on ../../pigeon/crates/{core,crypto}
 android/                    # the Android app (Gradle, Kotlin, Jetpack Compose)
   app/src/main/java/com/pigeon/mobile/
     PigeonApp.kt            # Application: installs the core's host callbacks once
-    MainActivity.kt         # hosts the Compose auth flow
+    MainActivity.kt         # routes between the auth flow and the room list
     LogcatSink.kt           # core LogSink → Android Logcat
     AndroidKeyStore.kt      # core KeyStore → EncryptedSharedPreferences
     auth/
       AuthViewModel.kt      # the thin view-model over the core's session API
       AuthScreen.kt         # the sign-in / register form
-      HomeScreen.kt         # the signed-in screen (+ sign out)
       AuthError.kt          # typed CoreException → user-facing message
+    rooms/
+      RoomsViewModel.kt     # thin VM: room list, sync lifecycle, create/join/invite
+      RoomListScreen.kt     # the signed-in landing screen (+ sign out)
+      ChatViewModel.kt      # thin VM: timeline, send, pagination, attach
+      ChatScreen.kt         # the timeline + composer (bubbles, system lines, images)
     app/build.gradle.kts    # the build glue (cargo-ndk + UniFFI codegen)
+ios/                        # the iOS app (Swift, SwiftUI; the same core as an xcframework)
 e2e/                        # the oneshot-homeserver end-to-end test (needs Docker)
 docs/                       # ARCHITECTURE.md, this guide
 ```
@@ -171,8 +182,11 @@ build and unit-test on the host with no device.
 
 ## Part 3 — The core, module by module
 
-Only three source files carry logic today: `lib.rs`, `api.rs`, `session.rs`. Read them in
-that order.
+The core has grown module by module with the phases. Start with the three that carry the
+foundations — `lib.rs`, `api.rs`, `session.rs` (§3.1–3.3), narrated in the most detail —
+then §3.4–3.9 sketch the rest: `store.rs`, `sync.rs`, `rooms.rs`, `e2ee.rs`, `keys.rs`,
+`media.rs`. For any of these, `ARCHITECTURE.md` §5 carries the per-stage build detail and
+the source is the final word.
 
 ### 3.1 `lib.rs` — the FFI entry point, logging, and the M0 smoke tests
 
@@ -253,7 +267,7 @@ This is the app's first real feature and the best example of the architecture in
 **`PigeonClient` (`session.rs:45`)** is a `uniffi::Object` — an opaque, reference-counted
 (`Arc`) handle the UI holds but cannot see inside. It owns the token-bearing `Api` and the
 `Session`. The UI can call `.session()` (get the non-secret identity) and `.logout()`, and
-in later phases sync/rooms/e2ee will hang off this same handle. **The token lives in
+sync/rooms/e2ee/media/backup all hang off this same handle (§3.4–3.9). **The token lives in
 here and never crosses the FFI** (Gotcha #1).
 
 **The keystore callback (`session.rs:96`+).** Same pattern as the log sink: `KeyStore` is
@@ -285,6 +299,95 @@ become Kotlin **`suspend` functions**:
   mirroring the reference CLI) then wipes the keystore. A *genuine* keystore fault is
   surfaced as `CoreError::Storage` — because otherwise the blob would silently restore on
   next launch.
+
+### 3.4 `store.rs` — the offline-first local store (M2.1+)
+
+SQLite via `rusqlite` (`bundled` — statically links SQLite for a clean `cargo-ndk`
+cross-compile). This is the **source of truth for reads**: the UI reads from here, the sync
+loop reconciles in the background (offline-first). It's an internal module — no FFI surface
+of its own; `rooms.rs`/`sync.rs` drive it.
+
+Schema highlights, grown by `user_version` migrations: an **insert-only `events` log** keyed
+by the server's content-hash `event_id` (so re-applying a `/sync` batch is idempotent —
+Gotcha #8); `room_state` folded **last-writer-wins by DAG `depth`** (rooms have no wire
+object — name/topic/encryption/membership are all state events we fold); a single-row
+`sync_token` holding the opaque composite `next_batch` verbatim (Gotcha #5). **v2** added the
+`events.local` echo flag + a `pending_sends` retry queue (`queue_send`/`resolve_send`/
+`fail_send` — local echo with server-ack reconciliation, §3.6). **v3** added the
+decrypted-plaintext cache (`events.decrypted` + `decrypt_state` + `pending_decrypts`) — each
+encrypted event is decrypted **once** and cached, because the MLS ratchet is one-way
+(Gotcha #3). Reads: `timeline` (depth-ordered, back-paginatable), `list_rooms`, `membership`,
+`current_state`, `is_room_encrypted`.
+
+### 3.5 `sync.rs` — the long-poll `/sync` loop (M2.2+)
+
+`PigeonClient.run_sync(observer)` is an endless async FFI that long-polls
+`GET /sync?since&timeout&limit`, folds each batch into the store, and advances the opaque
+`next_batch` verbatim. Change signalling is a coarse `SyncObserver` callback
+(`on_change`/`on_status(connected)`) — the host re-reads the store on a change. Offline-first:
+transport errors back off (1→30s) and retry; only a fatal error (revoked token) returns
+`Err`. **Cancellation (Gotcha #6):** the host runs it in a cancellable coroutine; dropping
+the future cancels the in-flight `/sync`.
+
+**Read the token ordering carefully** — it's the P2 review fix. `apply_sync` folds only
+`rooms.join[*].timeline.events`; `apply_to_device` folds inbound `p.mls.welcome` events into
+MLS state (§3.7); and `run_sync` calls `persist_sync_token` **last**, after both. The
+composite token also acks the to-device position (the server then deletes acked Welcomes), so
+persisting it *before* a Welcome is folded could skip a Welcome the server had already
+deleted — leaving that room permanently undecryptable. Every gated step is idempotent, so a
+redelivery after a pre-ack crash is safe. Each cycle also calls `flush_pending` (retry queued
+sends) and `decrypt_pending` (decrypt inbound ciphertext in DAG order).
+
+### 3.6 `rooms.rs` — room list, timeline, send, invite (M2.3+)
+
+The room/timeline FFI surface. `list_rooms()`/`timeline(room, limit, before)` are sync store
+reads; `create_room`/`join_room`/`fetch_messages`/`send_message`/`invite` are async. The key
+idea (Gotcha #9): **the core pre-renders each `TimelineEvent`** — a message `body` **or** a
+`system_text` line (membership/name/topic/encryption/create) **or** an `image` — so native
+code never parses a Pigeon event. `send_message` is offline-first with **local echo**: it
+queues a provisional echo (`store.queue_send`) then flushes; `flush_pending` promotes the echo
+to the server's real `event_id` when the send confirms, so the authoritative event from
+`/sync` dedups (no dup, no flicker). **M3.4** added `create_encrypted_room`, and made `invite`
+transparent — for a room whose MLS group we host it runs `claim_all_devices` → `add_member` →
+`/sendToDevice p.mls.welcome` per device.
+
+### 3.7 `e2ee.rs` — the MLS engine bridge (M3.1+)
+
+The **only** crypto path — a thin bridge to the reused `pigeon-crypto` (`openmls`), adding
+nothing of its own. It wraps a `Device` (identity: `create`/`restore`/`clear`,
+`signature_public_key_b64`, `key_packages(n)`) and the per-room group (group_id = room_id
+bytes: `has_group`/`create_group`/`add_member`→Welcome/`join_from_welcome`/`encrypt`/
+`decrypt`). `pigeon-crypto` has no pluggable storage, so after every state mutation the engine
+`export_storage()`s and persists `{pubkey, blob}` (base64) **through the host `KeyStore`**
+(`pigeon.mls.state.v1`) — private key material stays under the platform keystore (Gotcha #1),
+never the app DB, never across the FFI as plaintext. Idempotent on at-least-once to-device
+delivery (Gotcha #8). **Two behaviours to know:** the **P1** guard — a send into an encrypted
+room whose group we don't hold yet is *held queued*, never downgraded to plaintext; and the
+**M4.3** backup — `create_backup`/`restore_from_backup` (recovery key + opaque AEAD blob). Any
+change here needs a **negative test** in the same commit (wrong key, tampered ciphertext,
+replay) — the crypto rule.
+
+### 3.8 `keys.rs` — device-key query/claim (M3.1+)
+
+The key-directory orchestration for group establishment. The HTTP verbs
+(`upload_keys`/`query_keys`/`claim_keys`/`send_to_device`) live in `api.rs`; device-key
+*publishing* on login is in `session.rs` (`publish_device_keys` → `POST /keys/upload`,
+best-effort like the reference CLI). `keys.rs` itself is `claim_all_devices(api, user_id)` —
+the query→per-device-claim sequencing the CLI's `invite` does, returning `ClaimedKeyPackage`s
+for `add_member`. **P5 note:** `upload_keys` derives each `key_id` from a hash of the package
+(content-addressed), so republishing a pool after an identity change isn't silently dropped by
+the server's `(user, device, key_id)` dedup.
+
+### 3.9 `media.rs` — media upload/download (M4.1+)
+
+`pigeon://` content-URI parsing + a client-side 50 MiB size guard (→ a typed limit error,
+avoiding the server's bare 413). The raw transfer verbs (`upload_media`/`download_media`) live
+in `api.rs`; `send_image`/`download_image` + `TimelineEvent.image` in `rooms.rs`. Media is
+transparent to the room's encryption (M4.2): a plaintext room uploads bytes as-is; an
+encrypted room encrypts under a fresh per-file key (`E2ee.encrypt_media` →
+`pigeon-crypto`'s AES-GCM file primitive — no second crypto path), uploads the *ciphertext*,
+and puts the URL + key inside an E2EE'd `p.image` message (the key is never uploaded).
+`download_image` decrypts in-core (the key never leaves it — the Cardinal Rule).
 
 ---
 
@@ -363,8 +466,22 @@ crypto logic. It:
 taken."). It's a pure function so it's unit-tested without a device (`AuthErrorTest.kt`).
 It handles *every* variant — a federated, offline-prone client will hit them all.
 
-`MainActivity.kt` just renders view-model state and routes between `AuthScreen` and
-`HomeScreen`. That's the entire "logic" on the native side.
+`MainActivity.kt` just renders view-model state and routes between `AuthScreen` and — once
+signed in — `RoomListScreen`. That's the entire "logic" on the native side.
+
+**The rooms layer (`rooms/`, M2–M4)** is the same thin-VM pattern repeated for messaging.
+`RoomsViewModel` + `RoomListScreen` are the signed-in landing screen: the screen runs
+`run_sync` in a **client-keyed `LaunchedEffect`** so leaving it or a new session cancels the
+in-flight `/sync` (Gotcha #6), and the `SyncObserver` re-reads the store on each change and
+drives an offline indicator. Create/join dialogs (with an **encrypted toggle**, default on,
+picking `create_encrypted_room` vs `create_room`) and an invite action call straight into the
+core. `ChatViewModel` + `ChatScreen` are the timeline: bubbles aligned by sender vs
+`session.user_id`, centered `system_text` lines, scroll-to-top pagination, a composer with
+local-echo state ("Sending…"/"Not sent"), an **Attach** action (the system photo picker) and
+inline image thumbnails, and a 🔒 badge for encrypted rooms. Note what's *absent*: no event
+parsing, no crypto, no request bodies — every bubble is a core-rendered `TimelineEvent`
+(Gotcha #9). **iOS (M5)** mirrors all of this in SwiftUI under `ios/Pigeon/` over the *same*
+core — see `ARCHITECTURE.md` §6.
 
 ---
 
@@ -421,7 +538,7 @@ AuthScreen (tap "Log in")
         → finish_login: ks_put(session blob) via the KeyStore callback → AndroidKeyStore
         → returns Arc<PigeonClient>  (token stays inside)
   ← AuthViewModel holds the handle, calls .session()   state → SignedIn(session)
-  → MainActivity renders HomeScreen
+  → MainActivity renders RoomListScreen (which starts the sync loop)
 ```
 
 A server rejection (e.g. wrong password → `P_FORBIDDEN`) throws `CoreException.Api` across
@@ -444,13 +561,18 @@ MainActivity → AuthViewModel.init → coreRestoreSession()   state → Restori
 ### 7.3 Logout
 
 ```
-HomeScreen (tap "Sign out") → AuthViewModel.logout()   SignedIn(signingOut=true)
+RoomListScreen (tap "Sign out") → AuthViewModel.logout()   SignedIn(signingOut=true)
   → PigeonClient.logout() (Rust)
     → POST /logout  (best-effort — failure is logged, not fatal)
     → ks_delete(blob)   (a real keystore fault → CoreException.Storage)
   ← success → drop handle → SignedOut
   ← keystore fault → stay SignedIn(error) so the user can retry
 ```
+
+These three are the worked examples; the messaging flows they set up for — **run one sync
+cycle**, **send a message (with local echo)**, and **invite to an encrypted room
+(claim → add_member → Welcome over `/sendToDevice`)** — are diagrammed in `ARCHITECTURE.md`
+§8, driving the same core FFI.
 
 ---
 
@@ -567,11 +689,21 @@ check there, not here, before assuming what's in scope.
   register/login/restore returning an in-core `PigeonClient` (`session.rs`), keystore
   persistence + offline-first restore, the Compose auth UI, and logout — all validated by
   mock-HTTP tests and the `e2e/` oneshot lane.
-- **M2 — sync + plaintext rooms: active, not started.** The `/sync` long-poll loop + state
-  diffing (`sync.rs`), the local store (`store.rs` — SQLite, decide `sqlx` vs `rusqlite`),
-  a room list + timeline + plaintext send (`rooms.rs`), and the Compose UI over them. **Do
-  not pull M3 (e2ee) work forward.**
-- **M3 e2ee → M4 media/push → M5 iOS → M6 hardening:** later; see ROADMAP.
+- **M2 — sync + plaintext rooms: complete (M2.1–M2.6).** The offline-first SQLite store
+  (`store.rs` — `rusqlite`, bundled), the `/sync` long-poll loop (`sync.rs`), a room list +
+  paginated timeline + offline-first send with local echo + invites (`rooms.rs`), and the
+  Compose rooms UI. Exit gate: the `e2e/` `two_clients_hold_a_plaintext_conversation` lane.
+- **M3 — E2EE (the headline): complete (M3.1–M3.6).** The MLS engine bridge (`e2ee.rs`),
+  device-key query/claim (`keys.rs`), encrypted rooms + invite-with-Welcome + transparent
+  encrypted send/receive, and the encrypted-room UX. Exit gate:
+  `two_clients_exchange_encrypted_messages` (the wire carries only ciphertext).
+- **M4 — media, backup & polish: complete to the extent the server allows (M4.1–M4.3, M4.5).**
+  Media (`media.rs`), encrypted media, encrypted device backup/restore, and feasible polish.
+  **M4.4 (push) is blocked** — the homeserver exposes no push contract.
+- **M5 — iOS: complete (M5.1–M5.4).** The core packaged as an `xcframework`, then a SwiftUI
+  app (`ios/Pigeon/`) at feature parity with Android over the *same* core — built, tested, and
+  run on a simulator. APNs push inherits M4.4's server block.
+- **M6 — hardening & release:** next; see ROADMAP.
 
 **Phase discipline (CLAUDE.md):** don't add a later phase's features while in the current
 one. A *stub* for genuinely blocked later-phase work is fine; its *implementation* is not.
@@ -600,7 +732,7 @@ now, finish it now.
 - **`P_*` error codes** — the server's typed error set (`P_FORBIDDEN`, `P_USER_IN_USE`, …).
   Branch on the code, never the text.
 - **MLS** — Messaging Layer Security (RFC 9420), the E2EE protocol, used via `openmls`
-  inside `pigeon-crypto`. Arrives in M3.
+  inside `pigeon-crypto`; the client's bridge to it is `e2ee.rs` (built in M3).
 - **`cargo-ndk`** — cross-compiles the Rust core to a per-ABI Android `.so`.
 - **`10.0.2.2`** — from inside the Android emulator, the host machine's loopback (how the
   app reaches a homeserver running on your laptop).
