@@ -97,13 +97,15 @@ impl PigeonClient {
                         observer.on_change();
                     }
                 }
-                // Offline / unreachable: report disconnected, back off, retry.
-                // The loop survives — do not surface network blips as fatal.
-                Err(crate::api::ApiError::Network { reason }) => {
+                // Transient (offline/unreachable, or a 429 rate-limit now that the
+                // server's H9/M9 hardening makes it reachable): report disconnected,
+                // back off, retry. The loop survives — do not surface these as fatal
+                // or the app signs the user out on a blip / rate-limit.
+                Err(err) if err.is_transient() => {
                     crate::emit(
                         LogLevel::Info,
                         "sync",
-                        &format!("sync transport error, backing off {backoff:?}: {reason}"),
+                        &format!("sync retryable error, backing off {backoff:?}: {err}"),
                     );
                     observer.on_status(false);
                     tokio::time::sleep(backoff).await;

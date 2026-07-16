@@ -552,8 +552,10 @@ impl PigeonClient {
                     self.store.resolve_send(&send.txn_id, &event_id)?;
                     changed = true;
                 }
-                // Offline: leave this and the rest queued; retry next cycle.
-                Err(crate::api::ApiError::Network { .. }) => break,
+                // Transient (offline, or a 429 rate-limit): leave this and the rest
+                // queued and stop the pass — retry next cycle. Failing a send on a
+                // rate-limit would wrongly mark it "not sent".
+                Err(err) if err.is_transient() => break,
                 // The server rejected it (e.g. no longer joined): fail it so the
                 // user sees it didn't send, and continue with the others.
                 Err(_) => {
@@ -1046,6 +1048,64 @@ mod tests {
             .unwrap();
         bob.join_from_welcome(welcome).unwrap();
         assert!(bob.has_group("!enc:s").unwrap());
+    }
+
+    // A 429 rate-limit (now reachable after the server's H9/M9 hardening) must not
+    // fail a send terminally — it stays queued as a local echo and goes out on the
+    // next flush, exactly like an offline blip.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn rate_limited_send_stays_queued_then_recovers() {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@alice:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(&server)
+            .await;
+        let alice = crate::session::login(server.uri(), "alice".into(), "p".into())
+            .await
+            .unwrap();
+
+        // First send attempt is rate-limited; subsequent ones succeed (priority +
+        // up_to_n_times make the ordering deterministic).
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.message/.+$"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "errcode": "P_LIMIT_EXCEEDED", "error": "slow down"
+            })))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.message/.+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$real" })))
+            .with_priority(5)
+            .mount(&server)
+            .await;
+
+        // send_message queues an echo then flushes → the 429 leaves it queued.
+        alice
+            .send_message("!r:s".into(), "hi".into())
+            .await
+            .unwrap();
+        let tl = alice.timeline("!r:s".into(), 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert!(tl[0].pending, "rate-limited send is still sending");
+        assert!(!tl[0].failed, "a 429 must not mark the send failed");
+
+        // Next flush (as the sync loop would do) succeeds → the echo resolves.
+        alice.flush_pending().await.unwrap();
+        let tl = alice.timeline("!r:s".into(), 10, None).unwrap();
+        assert!(
+            !tl[0].pending && !tl[0].failed,
+            "send confirmed after retry"
+        );
     }
 
     // --- Encrypted event rendering (M3.5) ------------------------------------

@@ -327,9 +327,11 @@ hides `p.mls.commit` plumbing), `list_rooms`, `membership`, `current_state`, `is
 `GET /sync?since&timeout&limit`, folds each batch into the store, and advances the opaque
 `next_batch` verbatim. Change signalling is a coarse `SyncObserver` callback
 (`on_change`/`on_status(connected)`) — the host re-reads the store on a change. Offline-first:
-transport errors back off (1→30s) and retry; only a fatal error (revoked token) returns
-`Err`. **Cancellation (Gotcha #6):** the host runs it in a cancellable coroutine; dropping
-the future cancels the in-flight `/sync`.
+**transient** errors — a transport blip *and* a `P_LIMIT_EXCEEDED` (429) rate-limit, which the
+server's H9/M9 hardening made reachable — back off (1→30s) and retry (`ApiError::is_transient`);
+only a genuinely fatal error (revoked token, protocol mismatch) returns `Err`. **Cancellation
+(Gotcha #6):** the host runs it in a cancellable coroutine; dropping the future cancels the
+in-flight `/sync`.
 
 **Read the token ordering carefully** — it's the P2 review fix. `apply_sync` folds only
 `rooms.join[*].timeline.events`; `apply_to_device` folds inbound `p.mls.welcome` events into

@@ -122,6 +122,26 @@ pub enum ApiError {
     Malformed { reason: String },
 }
 
+impl ApiError {
+    /// Whether this failure is **transient** — worth backing off and retrying
+    /// rather than treating as fatal. A [`Network`](ApiError::Network) blip, or a
+    /// server rate-limit ([`ErrorCode::LimitExceeded`], HTTP 429). The server's
+    /// H9/M9 rate-limit hardening made 429 genuinely reachable, so the sync loop
+    /// must ride it out (not sign the user out) and a queued send must stay queued
+    /// (not fail terminally). Everything else — a revoked token, a protocol
+    /// mismatch, a real rejection — is fatal/terminal for its caller.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, ApiError::Network { .. })
+            || matches!(
+                self,
+                ApiError::Server {
+                    code: ErrorCode::LimitExceeded,
+                    ..
+                }
+            )
+    }
+}
+
 /// The server's response to `register`/`login` — the raw `AuthResponse`
 /// (`../../pigeon/crates/client-api/src/handlers/auth.rs`). Holds the
 /// `access_token`, so it stays *inside* the core (Gotcha #1) — `session.rs`
@@ -668,6 +688,23 @@ mod tests {
             }
             other => panic!("expected Server error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn is_transient_covers_network_and_rate_limit_only() {
+        let server = |code| ApiError::Server {
+            status: 0,
+            code,
+            message: String::new(),
+        };
+        // Retryable: a network blip and a 429 rate-limit (reachable after the
+        // server's H9/M9 hardening).
+        assert!(ApiError::Network { reason: "x".into() }.is_transient());
+        assert!(server(ErrorCode::LimitExceeded).is_transient());
+        // Fatal/terminal: a revoked token, a rejection, a protocol mismatch.
+        assert!(!server(ErrorCode::UnknownToken).is_transient());
+        assert!(!server(ErrorCode::Forbidden).is_transient());
+        assert!(!ApiError::Malformed { reason: "x".into() }.is_transient());
     }
 
     #[test]
