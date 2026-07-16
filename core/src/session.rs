@@ -110,10 +110,30 @@ impl PigeonClient {
                 return;
             }
         };
+        // The reusable last-resort package (server finding P6) keeps the device
+        // addable to new groups once the one-time pool is claimed dry.
+        // Best-effort like the rest of this publish: on failure, upload the
+        // pool without it.
+        let last_resort = match e2ee.last_resort_key_package() {
+            Ok(lr) => Some(lr),
+            Err(err) => {
+                crate::emit(
+                    LogLevel::Warn,
+                    "e2ee",
+                    &format!("could not generate the last-resort KeyPackage: {err}"),
+                );
+                None
+            }
+        };
         let pubkey = e2ee.signature_public_key_b64();
         match self
             .api
-            .upload_keys(&self.session.device_id, &pubkey, &kps)
+            .upload_keys(
+                &self.session.device_id,
+                &pubkey,
+                &kps,
+                last_resort.as_deref(),
+            )
             .await
         {
             Ok(count) => crate::emit(

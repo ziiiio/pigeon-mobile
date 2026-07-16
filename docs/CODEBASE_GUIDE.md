@@ -384,7 +384,12 @@ best-effort like the reference CLI). `keys.rs` itself is `claim_all_devices(api,
 the query→per-device-claim sequencing the CLI's `invite` does, returning `ClaimedKeyPackage`s
 for `add_member`. **P5 note:** `upload_keys` derives each `key_id` from a hash of the package
 (content-addressed), so republishing a pool after an identity change isn't silently dropped by
-the server's `(user, device, key_id)` dedup.
+the server's `(user, device, key_id)` dedup. **P6 note:** alongside the 5 one-time packages,
+`publish_device_keys` uploads one *reusable* **last-resort** package
+(`E2ee.last_resort_key_package()`, wire item flagged `last_resort: true`, best-effort). Once
+the one-time pool is claimed dry the server hands the last-resort one out repeatedly, so the
+device stays addable to new encrypted groups — without it, the 6th invite would ship no
+Welcome at all. The claim side doesn't care which kind it gets back.
 
 ### 3.9 `media.rs` — media upload/download (M4.1+)
 

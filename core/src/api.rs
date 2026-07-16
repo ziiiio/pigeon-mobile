@@ -320,20 +320,31 @@ impl Api {
     // delivery service — it never parses MLS bytes). `user_id`/`device_id` are
     // stamped server-side from the token, so they're absent from the body.
 
-    /// `POST /keys/upload` — publish this device's ed25519 identity key and a
-    /// pool of base64 KeyPackages (M3.1). Returns the device's remaining
-    /// KeyPackage count (each peer that adds us to a group claims one).
+    /// `POST /keys/upload` — publish this device's ed25519 identity key, a
+    /// pool of one-time base64 KeyPackages (M3.1), and optionally the reusable
+    /// **last-resort** package (`last_resort: true` — served once the one-time
+    /// pool is claimed dry, server finding P6). Returns the device's remaining
+    /// KeyPackage count (each peer that adds us to a group claims one; the
+    /// last-resort one doesn't count toward it).
     pub async fn upload_keys(
         &self,
         device_id: &str,
         public_key_b64: &str,
         key_packages_b64: &[String],
+        last_resort_b64: Option<&str>,
     ) -> Result<u32, ApiError> {
-        let packages: Vec<Value> = key_packages_b64
+        let mut packages: Vec<Value> = key_packages_b64
             .iter()
             .enumerate()
-            .map(|(i, pkg)| json!({ "key_id": key_package_id(pkg, i), "package": pkg }))
+            .map(|(i, pkg)| {
+                json!({ "key_id": key_package_id(pkg, i), "package": pkg, "last_resort": false })
+            })
             .collect();
+        if let Some(lr) = last_resort_b64 {
+            packages.push(
+                json!({ "key_id": key_package_id(lr, packages.len()), "package": lr, "last_resort": true }),
+            );
+        }
         let body = json!({
             "device_keys": {
                 "algorithms": ["p.mls.1"],
@@ -612,6 +623,48 @@ fn parse_auth(body: &Value) -> Result<AuthResponse, ApiError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn upload_keys_flags_the_last_resort_package() {
+        // The one-time pool uploads with `last_resort: false`; the reusable
+        // fallback package rides along flagged `last_resort: true` (finding P6).
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/keys/upload"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "key_package_count": 2 })),
+            )
+            .mount(&server)
+            .await;
+
+        let api = Api::new(server.uri(), Some("tok".into())).unwrap();
+        let count = api
+            .upload_keys(
+                "DEV1",
+                "cHVia2V5",
+                &["cGtnLW9uZQ==".into(), "cGtnLXR3bw==".into()],
+                Some("bGFzdC1yZXNvcnQ="),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let packages = body["key_packages"].as_array().unwrap();
+        assert_eq!(packages.len(), 3);
+        assert_eq!(packages[0]["last_resort"], json!(false));
+        assert_eq!(packages[1]["last_resort"], json!(false));
+        assert_eq!(packages[2]["last_resort"], json!(true));
+        assert_eq!(packages[2]["package"], json!("bGFzdC1yZXNvcnQ="));
+        // Every item still carries a content-addressed id (finding P5).
+        for p in packages {
+            assert!(p["key_id"].as_str().unwrap().starts_with("kp-"));
+        }
+    }
 
     #[test]
     fn key_package_id_is_content_addressed() {

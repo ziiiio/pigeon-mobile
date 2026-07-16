@@ -126,6 +126,20 @@ impl E2ee {
         Ok(packages.iter().map(|kp| STANDARD.encode(kp)).collect())
     }
 
+    /// Generate the reusable **last-resort** KeyPackage (base64) for
+    /// `/keys/upload` (server finding P6). Unlike the one-time pool, the server
+    /// hands this package out repeatedly once the pool is claimed dry, so the
+    /// device stays addable to new encrypted groups. Its private part persists
+    /// in device state (and openmls keeps it after a Welcome consumes it —
+    /// that's what makes it reusable), so this **persists** like
+    /// [`Self::key_packages`].
+    pub fn last_resort_key_package(&self) -> Result<String, CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let kp = device.new_last_resort_key_package()?;
+        persist(&device)?;
+        Ok(STANDARD.encode(kp))
+    }
+
     /// Whether this device holds the MLS group for `room_id` — i.e. the room is
     /// encrypted *and we're a member*. The group id is the room id's bytes.
     pub fn has_group(&self, room_id: &str) -> Result<bool, CoreError> {
@@ -426,6 +440,34 @@ mod tests {
 
         // Both now hold the group for the room (group id = room id bytes).
         assert!(bob.has_group("!room:test.example").unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn last_resort_key_package_is_usable_for_a_join() {
+        // The last-resort package (finding P6) must be a *real* KeyPackage: an
+        // inviter can add a member with it and the resulting Welcome joins.
+        set_key_store(Box::new(MemStore::default()));
+        let alice = E2ee::create("@alice:test.example").unwrap();
+        let bob = E2ee::create("@bob:test.example").unwrap();
+
+        let bob_lr = bob.last_resort_key_package().unwrap();
+        alice.create_group("!room:test.example").unwrap();
+        let welcome = alice
+            .add_member("!room:test.example", &bob_lr)
+            .unwrap()
+            .welcome;
+        bob.join_from_welcome(&welcome).unwrap();
+        assert!(bob.has_group("!room:test.example").unwrap());
+
+        // The message path works over the last-resort-established group too.
+        let ct = alice
+            .encrypt("!room:test.example", "via last resort")
+            .unwrap();
+        assert_eq!(
+            bob.decrypt("!room:test.example", &ct).unwrap(),
+            "via last resort"
+        );
     }
 
     #[test]
