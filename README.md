@@ -14,9 +14,17 @@ Pigeon Mobile is a thin native UI over a **shared Rust core**. Everything that i
 
 ## Status
 
-🚧 **Phase M0 (foundations) — not yet usable.** The Rust core builds and tests against the reused homeserver crypto crate, and UniFFI generates Kotlin bindings from it (verified in the Docker dev container). Still to come in M0: the Android NDK cross-compile, the Hello-core Compose app, build glue, and CI.
+✅ **Phases M0–M5 complete; M6 (hardening & release) is next.** Both apps are feature-complete to the extent the homeserver allows, driven by one shared core:
 
-See [`ROADMAP.md`](ROADMAP.md) for the phase plan (M0 toolchain → M1 identity → M2 plaintext messaging → M3 E2EE → M4 media/backup/push → M5 iOS → M6 hardening).
+- **Identity (M1):** register / login / offline-first session restore / logout, tokens held in-core.
+- **Plaintext messaging (M2):** room list, create/join, timeline with pagination, offline-first send with local echo, invites — reconciled by the background `/sync` loop.
+- **End-to-end encryption (M3):** MLS-encrypted rooms via the reused `pigeon-crypto` engine — encrypted create, invite-with-Welcome, transparent encrypted send/receive.
+- **Media, backup & polish (M4):** media upload/download, encrypted media, encrypted device backup/restore via a recovery key, timestamps and accessibility polish.
+- **iOS (M5):** a SwiftUI app at feature parity with Android over the *same* core — built, unit-tested, and run on a simulator.
+
+The full **Rust → UniFFI → Kotlin/Swift → Compose/SwiftUI** pipeline round-trips on-device on both platforms. The one feature not built is **push notifications** — the homeserver exposes no push/APNs/FCM contract yet, so real-time delivery is the `/sync` long-poll; it will be built when the server grows a push endpoint.
+
+See [`ROADMAP.md`](ROADMAP.md) for the phase plan (M0 toolchain → M1 identity → M2 plaintext messaging → M3 E2EE → M4 media/backup/push → M5 iOS → M6 hardening) and per-stage status.
 
 ## Why a shared Rust core?
 
@@ -27,8 +35,8 @@ The client must do MLS (RFC 9420) encryption **on-device**, and private keys mus
 ```
 core/        # pigeon-mobile-core — the shared Rust crate (UniFFI); reuses pigeon-crypto + pigeon-core
 android/     # the Android app (Gradle, Kotlin, Jetpack Compose)
-ios/         # the iOS app (Phase M5; Swift, SwiftUI)
-docs/        # ARCHITECTURE.md
+ios/         # the iOS app (Swift, SwiftUI; the same core packaged as an xcframework)
+docs/        # ARCHITECTURE.md, CODEBASE_GUIDE.md
 CLAUDE.md    # rulebook for contributors / AI assistants
 ROADMAP.md   # the phase plan
 ```
