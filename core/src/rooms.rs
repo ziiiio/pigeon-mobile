@@ -464,9 +464,10 @@ impl PigeonClient {
         let resp = self.api.messages(&room_id, limit).await?;
         let chunk: Vec<serde_json::Value> = resp["chunk"].as_array().cloned().unwrap_or_default();
         let inserted = self.store.apply_events(&chunk)?;
-        // Decrypt any encrypted events this backfill just stored (M3.5), so the
-        // opened timeline shows plaintext rather than pending ciphertext.
-        self.decrypt_pending()?;
+        // Process any inbound MLS events this backfill just stored (M3.5 + C1):
+        // apply commits and decrypt messages, so the opened timeline shows
+        // plaintext rather than pending ciphertext.
+        self.process_inbound_mls()?;
         Ok(inserted as u32)
     }
 
@@ -580,37 +581,75 @@ impl PigeonClient {
         }
     }
 
-    /// Decrypt every not-yet-decrypted `p.room.encrypted` event in the store and
-    /// cache its plaintext (M3.5). Decryption advances the MLS ratchet and is
-    /// order-sensitive, so events are processed in DAG order and exactly once
-    /// (Gotcha #3). A message for a room whose group we don't hold *yet* is left
-    /// pending (its Welcome may arrive on a later sync); a genuine decrypt failure
-    /// (tampered / wrong epoch / not a member) is marked terminally undecryptable.
+    /// Process every not-yet-handled inbound MLS event in the store — apply
+    /// `p.mls.commit` group changes and decrypt `p.room.encrypted` messages — in
+    /// one DAG-ordered, exactly-once pass (M3.5 + finding C1). Both advance/depend
+    /// on the MLS ratchet, which is order-sensitive (Gotcha #3): a commit that
+    /// changes the epoch is applied *before* the encrypted messages that follow it,
+    /// so they share one ordering (see [`crate::store::Store::pending_mls`]).
+    ///
+    /// - **Commit** — skip our **own** (we self-merged on add); otherwise apply it.
+    ///   A commit that doesn't apply to our current epoch (the one that *added us*,
+    ///   or a replay) errors harmlessly and is marked processed, never retried. A
+    ///   room we don't hold the group for yet leaves the commit pending.
+    /// - **Message** — decrypt and cache the plaintext; a room whose group we don't
+    ///   hold *yet* is left pending (its Welcome may arrive on a later sync); a
+    ///   genuine failure (tampered / wrong epoch / not a member) is marked
+    ///   terminally undecryptable.
+    ///
     /// Returns whether anything changed (so the caller can refresh). Never logs
     /// plaintext or key material (Gotcha #2).
-    pub(crate) fn decrypt_pending(&self) -> Result<bool, CoreError> {
+    pub(crate) fn process_inbound_mls(&self) -> Result<bool, CoreError> {
         let Some(e2ee) = self.e2ee.as_ref() else {
             return Ok(false);
         };
+        let self_user = self.session().user_id;
         let mut changed = false;
-        for pending in self.store.pending_decrypts()? {
-            // No group yet — leave it pending; a Welcome may still arrive.
-            if !e2ee.has_group(&pending.room_id)? {
-                continue;
-            }
-            match e2ee.decrypt(&pending.room_id, &pending.ciphertext_b64) {
-                Ok(plaintext) => {
-                    self.store.set_decrypted(&pending.event_id, &plaintext)?;
+        for pending in self.store.pending_mls()? {
+            match pending {
+                crate::store::PendingMls::Commit(commit) => {
+                    // No group yet — leave it pending; a Welcome may still arrive
+                    // (then a later pass applies this, if it's still ahead of us).
+                    if !e2ee.has_group(&commit.room_id)? {
+                        continue;
+                    }
+                    // Our own commit is already self-merged; consume it without
+                    // re-applying (which would error).
+                    if commit.sender != self_user {
+                        if let Err(err) = e2ee.process_commit(&commit.room_id, &commit.commit_b64) {
+                            // Expected when the commit doesn't advance *us* — the
+                            // commit that added us (we're already at its epoch via
+                            // the Welcome), or a replay. Not fatal: consume it.
+                            crate::emit(
+                                crate::LogLevel::Info,
+                                "e2ee",
+                                &format!("commit {} not applied (skipped): {err}", commit.event_id),
+                            );
+                        }
+                    }
+                    self.store.set_commit_processed(&commit.event_id)?;
                     changed = true;
                 }
-                Err(err) => {
-                    crate::emit(
-                        crate::LogLevel::Warn,
-                        "e2ee",
-                        &format!("failed to decrypt {}: {err}", pending.event_id),
-                    );
-                    self.store.set_decrypt_failed(&pending.event_id)?;
-                    changed = true;
+                crate::store::PendingMls::Message(msg) => {
+                    // No group yet — leave it pending; a Welcome may still arrive.
+                    if !e2ee.has_group(&msg.room_id)? {
+                        continue;
+                    }
+                    match e2ee.decrypt(&msg.room_id, &msg.ciphertext_b64) {
+                        Ok(plaintext) => {
+                            self.store.set_decrypted(&msg.event_id, &plaintext)?;
+                            changed = true;
+                        }
+                        Err(err) => {
+                            crate::emit(
+                                crate::LogLevel::Warn,
+                                "e2ee",
+                                &format!("failed to decrypt {}: {err}", msg.event_id),
+                            );
+                            self.store.set_decrypt_failed(&msg.event_id)?;
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
@@ -619,10 +658,19 @@ impl PigeonClient {
 }
 
 impl PigeonClient {
-    /// Add `user_id`'s devices to `room_id`'s MLS group and ship each a `Welcome`
-    /// over `/sendToDevice` (M3.4). Claims one KeyPackage per device, `add_member`
-    /// (self-merging — add-mostly groups), then sends `p.mls.welcome` with
-    /// `{welcome, room_id}` to that device. Never logs key material (Gotcha #2).
+    /// Add `user_id`'s devices to `room_id`'s MLS group (M3.4), delivering to each
+    /// the `Welcome` and broadcasting the resulting `commit` to the existing
+    /// members (finding C1). Per device: claim a KeyPackage, `add_member` (which
+    /// self-merges our commit and yields the Welcome + commit), then
+    /// 1. ship `p.mls.welcome` `{welcome, room_id}` to *that device* over
+    ///    `/sendToDevice` so it can join, and
+    /// 2. broadcast `p.mls.commit` `{commit}` as a room event so the *earlier*
+    ///    members advance to the new epoch and keep decrypting.
+    ///
+    /// Without step 2 a third+ member's addition would strand the earlier members a
+    /// ratchet epoch behind. The commit rides the same `/send` route as any room
+    /// event; the invitee (already at the post-commit epoch via the Welcome) and we
+    /// (self-merged) both skip it on receipt. Never logs key material (Gotcha #2).
     async fn welcome_to_group(
         &self,
         e2ee: &crate::e2ee::E2ee,
@@ -631,12 +679,18 @@ impl PigeonClient {
     ) -> Result<(), CoreError> {
         let claimed = crate::keys::claim_all_devices(&self.api, user_id).await?;
         for kp in claimed {
-            let welcome = e2ee.add_member(room_id, &kp.key_package_b64)?;
+            let outcome = e2ee.add_member(room_id, &kp.key_package_b64)?;
             let messages = serde_json::json!({
-                user_id: { kp.device_id: { "welcome": welcome, "room_id": room_id } }
+                user_id: { kp.device_id: { "welcome": outcome.welcome, "room_id": room_id } }
             });
             self.api
                 .send_to_device("p.mls.welcome", &next_txn_id(), &messages)
+                .await?;
+            // Broadcast the commit to existing members (finding C1). Each device
+            // added advances the epoch and yields its own commit, sent in order.
+            let commit = serde_json::json!({ "commit": outcome.commit });
+            self.api
+                .send_event(room_id, "p.mls.commit", &next_txn_id(), &commit)
                 .await?;
         }
         Ok(())
@@ -833,7 +887,12 @@ mod tests {
         alice.e2ee().unwrap().create_group("!enc:s").unwrap();
         let bob = E2ee::create("@bob:s").unwrap();
         let bob_kp = bob.key_packages(1).unwrap().remove(0);
-        let welcome = alice.e2ee().unwrap().add_member("!enc:s", &bob_kp).unwrap();
+        let welcome = alice
+            .e2ee()
+            .unwrap()
+            .add_member("!enc:s", &bob_kp)
+            .unwrap()
+            .welcome;
         bob.join_from_welcome(&welcome).unwrap();
 
         // Capture the ciphertext the upload receives so we can serve it back.
@@ -895,6 +954,100 @@ mod tests {
         assert_eq!(recovered, photo, "the image round-trips through E2EE media");
     }
 
+    // Inviting into an encrypted room we host broadcasts the MLS commit as a
+    // `p.mls.commit` room event (finding C1) in addition to the per-device
+    // Welcome, so existing members can advance to the new epoch. Uses a real MLS
+    // KeyPackage so the Welcome + commit are genuine.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn invite_into_encrypted_room_broadcasts_the_commit() {
+        use crate::e2ee::E2ee;
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@alice:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(&server)
+            .await;
+        let alice = crate::session::login(server.uri(), "alice".into(), "p".into())
+            .await
+            .unwrap();
+        alice.e2ee().unwrap().create_group("!enc:s").unwrap();
+
+        // Bob is a real second device with a published KeyPackage to claim.
+        let bob = E2ee::create("@bob:s").unwrap();
+        let bob_kp = bob.key_packages(1).unwrap().remove(0);
+
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/rooms/!enc:s/invite"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$inv" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/keys/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_keys": { "@bob:s": {
+                    "D2": { "user_id": "@bob:s", "device_id": "D2",
+                            "algorithms": ["p.mls.1"], "keys": {}, "signatures": {} }
+                } }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/keys/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "one_time_keys": { "@bob:s": { "D2": { "key_id": "kp-x", "package": bob_kp } } }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/sendToDevice/p\.mls\.welcome/.+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.mls\.commit/.+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$c" })))
+            .mount(&server)
+            .await;
+
+        alice
+            .invite("!enc:s".into(), "@bob:s".into())
+            .await
+            .expect("invite with Welcome + commit");
+
+        let reqs = server.received_requests().await.unwrap();
+        // The commit was broadcast as a room event with a non-empty base64 commit.
+        let commit_body: serde_json::Value = serde_json::from_slice(
+            &reqs
+                .iter()
+                .find(|r| r.url.path().contains("/send/p.mls.commit/"))
+                .expect("a p.mls.commit was broadcast")
+                .body,
+        )
+        .unwrap();
+        assert!(!commit_body["commit"].as_str().unwrap().is_empty());
+
+        // The Welcome shipped to Bob's device is a genuine, joinable Welcome.
+        let welcome_body: serde_json::Value = serde_json::from_slice(
+            &reqs
+                .iter()
+                .find(|r| r.url.path().contains("/sendToDevice/p.mls.welcome/"))
+                .expect("a Welcome was sent to-device")
+                .body,
+        )
+        .unwrap();
+        let welcome = welcome_body["messages"]["@bob:s"]["D2"]["welcome"]
+            .as_str()
+            .unwrap();
+        bob.join_from_welcome(welcome).unwrap();
+        assert!(bob.has_group("!enc:s").unwrap());
+    }
+
     // --- Encrypted event rendering (M3.5) ------------------------------------
 
     #[test]
@@ -942,7 +1095,7 @@ mod tests {
     // engines (alice sends, bob is the client) through a wiremock-backed login.
     #[tokio::test]
     #[serial_test::serial]
-    async fn decrypt_pending_decrypts_inbound_and_caches_plaintext() {
+    async fn process_inbound_mls_decrypts_inbound_and_caches_plaintext() {
         use crate::e2ee::E2ee;
 
         let bob = login_client().await;
@@ -955,7 +1108,7 @@ mod tests {
             .unwrap()
             .remove(0);
         alice.create_group("!enc:s").unwrap();
-        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap();
+        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap().welcome;
         bob.e2ee
             .as_ref()
             .unwrap()
@@ -977,16 +1130,16 @@ mod tests {
             bob.timeline("!enc:s".into(), 10, None).unwrap()[0].body,
             None
         );
-        assert!(bob.decrypt_pending().unwrap());
+        assert!(bob.process_inbound_mls().unwrap());
         let tl = bob.timeline("!enc:s".into(), 10, None).unwrap();
         assert_eq!(tl[0].body.as_deref(), Some("secret hi"));
         // Idempotent: the ratchet already advanced, so no re-decrypt (Gotcha #3).
-        assert!(!bob.decrypt_pending().unwrap());
+        assert!(!bob.process_inbound_mls().unwrap());
     }
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn decrypt_pending_marks_undecryptable_events_failed() {
+    async fn process_inbound_mls_marks_undecryptable_events_failed() {
         use crate::e2ee::E2ee;
 
         // Bob holds a group but is fed a ciphertext he can't decrypt (garbage).
@@ -1000,7 +1153,7 @@ mod tests {
             .unwrap()
             .remove(0);
         alice.create_group("!enc:s").unwrap();
-        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap();
+        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap().welcome;
         bob.e2ee
             .as_ref()
             .unwrap()
@@ -1015,7 +1168,7 @@ mod tests {
             })])
             .unwrap();
 
-        assert!(bob.decrypt_pending().unwrap());
+        assert!(bob.process_inbound_mls().unwrap());
         let tl = bob.timeline("!enc:s".into(), 10, None).unwrap();
         assert_eq!(tl[0].body, None);
         // Rendered as the unable-to-decrypt placeholder (terminal failure).

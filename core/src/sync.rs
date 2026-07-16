@@ -82,16 +82,18 @@ impl PigeonClient {
                     // above are idempotent, so a redelivery after a pre-ack crash
                     // is safe.
                     persist_sync_token(self, &resp)?;
-                    // Decrypt any newly-arrived encrypted events and cache their
-                    // plaintext (M3.5) before signalling — so the UI re-reads
-                    // plaintext, not pending ciphertext.
-                    let decrypted = self.decrypt_pending()?;
+                    // Process newly-arrived inbound MLS events (M3.5 + finding C1):
+                    // apply `p.mls.commit` group changes and decrypt
+                    // `p.room.encrypted` messages, in one DAG-ordered pass, before
+                    // signalling — so the UI re-reads plaintext, not pending
+                    // ciphertext, and the group stays at the right epoch.
+                    let mls_changed = self.process_inbound_mls()?;
                     // We're online — a good moment to (re)transmit queued sends
                     // (offline-first retry, M2.5). Any of these can change the store.
                     let flushed = self.flush_pending().await?;
                     backoff = BACKOFF_START;
                     observer.on_status(true);
-                    if applied || joined || decrypted || flushed {
+                    if applied || joined || mls_changed || flushed {
                         observer.on_change();
                     }
                 }
@@ -333,7 +335,7 @@ mod tests {
             .unwrap()
             .remove(0);
         alice.create_group("!enc:s").unwrap();
-        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap();
+        let welcome = alice.add_member("!enc:s", &bob_kp).unwrap().welcome;
 
         // A /sync carrying the Welcome as a to-device event.
         let resp = json!({

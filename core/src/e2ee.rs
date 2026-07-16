@@ -53,6 +53,21 @@ pub struct E2ee {
     device: Mutex<Device>,
 }
 
+/// The result of [`E2ee::add_member`] (`pigeon-crypto` finding C1): both halves of
+/// an add, base64-encoded for the wire.
+///
+/// - `welcome` goes to the **new** member out of band (`/sendToDevice`,
+///   `p.mls.welcome`) so they can join the group.
+/// - `commit` must be broadcast to the **existing** members as a room event
+///   (`p.mls.commit`); each applies it via [`E2ee::process_commit`] to advance to
+///   the new epoch. Without it, a *third* member's addition strands the earlier
+///   members a ratchet epoch behind and they can no longer decrypt. (The author
+///   self-merges its own commit, so it must not re-apply this one.)
+pub struct AddOutcome {
+    pub welcome: String,
+    pub commit: String,
+}
+
 impl E2ee {
     /// Create a **fresh** device identity for `user_id` and persist it. Called on
     /// register/login — each authenticated session mints a new MLS identity
@@ -127,10 +142,16 @@ impl E2ee {
     }
 
     /// Add a member to `room_id`'s group from their base64 KeyPackage (M3.4);
-    /// returns the base64 `Welcome` to deliver over `/sendToDevice`. `add_member`
-    /// self-merges the commit locally (add-mostly groups), so only the Welcome is
-    /// produced. Persists (group state advances).
-    pub fn add_member(&self, room_id: &str, key_package_b64: &str) -> Result<String, CoreError> {
+    /// returns the [`AddOutcome`] — the `Welcome` for the new member **and** the
+    /// `commit` the existing members must apply (`pigeon-crypto` finding C1). The
+    /// engine self-merges our own commit locally (we advance immediately), so the
+    /// caller ships the Welcome to the invitee and broadcasts the commit to the
+    /// room; we must not re-process our own commit. Persists (group state advances).
+    pub fn add_member(
+        &self,
+        room_id: &str,
+        key_package_b64: &str,
+    ) -> Result<AddOutcome, CoreError> {
         let device = self.device.lock().expect("e2ee mutex poisoned");
         let mut group =
             device
@@ -139,9 +160,28 @@ impl E2ee {
                     reason: format!("no MLS group for {room_id}"),
                 })?;
         let key_package = decode_wire(key_package_b64, "KeyPackage")?;
-        let welcome = device.add_member(&mut group, &key_package)?;
+        let outcome = device.add_member(&mut group, &key_package)?;
         persist(&device)?;
-        Ok(STANDARD.encode(welcome))
+        Ok(AddOutcome {
+            welcome: STANDARD.encode(outcome.welcome),
+            commit: STANDARD.encode(outcome.commit),
+        })
+    }
+
+    /// Apply a base64 `p.mls.commit` broadcast by another member's `add_member`
+    /// (finding C1), advancing our copy of `room_id`'s group to the new epoch so we
+    /// can keep decrypting. Persists (the ratchet advances). Idempotent-safe for
+    /// the caller: a commit that doesn't apply to our current epoch — our **own**
+    /// commit (already self-merged), or the one that *added us* (we joined at the
+    /// post-commit epoch via the Welcome), or a replay — surfaces as an error the
+    /// sync loop swallows; only a commit that legitimately advances us returns
+    /// `Ok`. Errors if we don't hold the group. Never logs key material (Gotcha #2).
+    pub fn process_commit(&self, room_id: &str, commit_b64: &str) -> Result<(), CoreError> {
+        let device = self.device.lock().expect("e2ee mutex poisoned");
+        let mut group = load_group(&device, room_id)?;
+        let commit = decode_wire(commit_b64, "commit")?;
+        device.process_commit(&mut group, &commit)?;
+        persist(&device)
     }
 
     /// Join a group from a base64 `Welcome` (pulled from a `p.mls.welcome`
@@ -378,7 +418,10 @@ mod tests {
         assert!(alice.has_group("!room:test.example").unwrap());
         assert!(!bob.has_group("!room:test.example").unwrap());
 
-        let welcome = alice.add_member("!room:test.example", &bob_kp).unwrap();
+        let welcome = alice
+            .add_member("!room:test.example", &bob_kp)
+            .unwrap()
+            .welcome;
         bob.join_from_welcome(&welcome).unwrap();
 
         // Both now hold the group for the room (group id = room id bytes).
@@ -396,7 +439,10 @@ mod tests {
         // Establish a shared group: alice hosts, bob joins via Welcome.
         let bob_kp = bob.key_packages(1).unwrap().remove(0);
         alice.create_group("!room:test.example").unwrap();
-        let welcome = alice.add_member("!room:test.example", &bob_kp).unwrap();
+        let welcome = alice
+            .add_member("!room:test.example", &bob_kp)
+            .unwrap()
+            .welcome;
         bob.join_from_welcome(&welcome).unwrap();
 
         // Alice → Bob round-trip.
@@ -416,6 +462,66 @@ mod tests {
         // Negative: valid base64 that isn't an MLS message.
         assert!(bob
             .decrypt("!room:test.example", &STANDARD.encode(b"garbage"))
+            .is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn third_member_commit_keeps_earlier_member_in_sync() {
+        // finding C1: adding a *third* member advances the group epoch. The
+        // earlier member (bob) must apply the broadcast commit or he falls a
+        // ratchet epoch behind and can no longer decrypt.
+        set_key_store(Box::new(MemStore::default()));
+        let alice = E2ee::create("@alice:test.example").unwrap();
+        let bob = E2ee::create("@bob:test.example").unwrap();
+        let carol = E2ee::create("@carol:test.example").unwrap();
+
+        // Alice hosts; bob joins (two-party — no existing members to notify).
+        let bob_kp = bob.key_packages(1).unwrap().remove(0);
+        alice.create_group("!room:test.example").unwrap();
+        let add_bob = alice.add_member("!room:test.example", &bob_kp).unwrap();
+        bob.join_from_welcome(&add_bob.welcome).unwrap();
+
+        // Alice adds carol → a Welcome for carol AND a commit for the existing
+        // member (bob).
+        let carol_kp = carol.key_packages(1).unwrap().remove(0);
+        let add_carol = alice.add_member("!room:test.example", &carol_kp).unwrap();
+        carol.join_from_welcome(&add_carol.welcome).unwrap();
+
+        // The commit does NOT apply to the author (already self-merged) nor to the
+        // just-added member (already at the post-commit epoch via the Welcome) —
+        // both error, which the sync loop swallows.
+        assert!(
+            alice
+                .process_commit("!room:test.example", &add_carol.commit)
+                .is_err(),
+            "author must not re-apply its own commit"
+        );
+        assert!(
+            carol
+                .process_commit("!room:test.example", &add_carol.commit)
+                .is_err(),
+            "the added member is already at the new epoch"
+        );
+
+        // Alice encrypts at the new epoch. Bob, still a ratchet epoch behind,
+        // cannot yet decrypt it (the negative that motivates C1).
+        let ct = alice.encrypt("!room:test.example", "hi all").unwrap();
+        assert!(
+            bob.decrypt("!room:test.example", &ct).is_err(),
+            "bob is an epoch behind until he applies the commit"
+        );
+
+        // Bob applies the broadcast commit → advances → now decrypts.
+        bob.process_commit("!room:test.example", &add_carol.commit)
+            .unwrap();
+        assert_eq!(bob.decrypt("!room:test.example", &ct).unwrap(), "hi all");
+        // Carol (correctly at the new epoch) also decrypts.
+        assert_eq!(carol.decrypt("!room:test.example", &ct).unwrap(), "hi all");
+
+        // A garbage commit fails cleanly (never panics / wedges).
+        assert!(bob
+            .process_commit("!room:test.example", &STANDARD.encode(b"garbage"))
             .is_err());
     }
 

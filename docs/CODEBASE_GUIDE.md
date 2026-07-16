@@ -314,10 +314,12 @@ object — name/topic/encryption/membership are all state events we fold); a sin
 `sync_token` holding the opaque composite `next_batch` verbatim (Gotcha #5). **v2** added the
 `events.local` echo flag + a `pending_sends` retry queue (`queue_send`/`resolve_send`/
 `fail_send` — local echo with server-ack reconciliation, §3.6). **v3** added the
-decrypted-plaintext cache (`events.decrypted` + `decrypt_state` + `pending_decrypts`) — each
-encrypted event is decrypted **once** and cached, because the MLS ratchet is one-way
-(Gotcha #3). Reads: `timeline` (depth-ordered, back-paginatable), `list_rooms`, `membership`,
-`current_state`, `is_room_encrypted`.
+decrypted-plaintext cache (`events.decrypted` + `decrypt_state`) — each encrypted event is
+decrypted **once** and cached, because the MLS ratchet is one-way (Gotcha #3). `pending_mls`
+yields inbound `p.room.encrypted` (decrypt) and `p.mls.commit` (apply) in one DAG-ordered
+stream (finding C1 — both advance the ratchet, so they share one ordering);
+`set_commit_processed` marks a commit done. Reads: `timeline` (depth-ordered, back-paginatable,
+hides `p.mls.commit` plumbing), `list_rooms`, `membership`, `current_state`, `is_room_encrypted`.
 
 ### 3.5 `sync.rs` — the long-poll `/sync` loop (M2.2+)
 
@@ -336,7 +338,8 @@ composite token also acks the to-device position (the server then deletes acked 
 persisting it *before* a Welcome is folded could skip a Welcome the server had already
 deleted — leaving that room permanently undecryptable. Every gated step is idempotent, so a
 redelivery after a pre-ack crash is safe. Each cycle also calls `flush_pending` (retry queued
-sends) and `decrypt_pending` (decrypt inbound ciphertext in DAG order).
+sends) and `process_inbound_mls` — one DAG-ordered pass that applies `p.mls.commit` group
+changes and decrypts `p.room.encrypted` messages (finding C1, §3.7).
 
 ### 3.6 `rooms.rs` — room list, timeline, send, invite (M2.3+)
 
@@ -349,23 +352,26 @@ queues a provisional echo (`store.queue_send`) then flushes; `flush_pending` pro
 to the server's real `event_id` when the send confirms, so the authoritative event from
 `/sync` dedups (no dup, no flicker). **M3.4** added `create_encrypted_room`, and made `invite`
 transparent — for a room whose MLS group we host it runs `claim_all_devices` → `add_member` →
-`/sendToDevice p.mls.welcome` per device.
+`/sendToDevice p.mls.welcome` per device, **and broadcasts the resulting `p.mls.commit` as a
+room event** so existing members advance to the new epoch (finding C1 — multi-member groups).
 
 ### 3.7 `e2ee.rs` — the MLS engine bridge (M3.1+)
 
 The **only** crypto path — a thin bridge to the reused `pigeon-crypto` (`openmls`), adding
 nothing of its own. It wraps a `Device` (identity: `create`/`restore`/`clear`,
 `signature_public_key_b64`, `key_packages(n)`) and the per-room group (group_id = room_id
-bytes: `has_group`/`create_group`/`add_member`→Welcome/`join_from_welcome`/`encrypt`/
-`decrypt`). `pigeon-crypto` has no pluggable storage, so after every state mutation the engine
+bytes: `has_group`/`create_group`/`add_member`→`AddOutcome{welcome, commit}`/`process_commit`/
+`join_from_welcome`/`encrypt`/`decrypt`). `pigeon-crypto` has no pluggable storage, so after every state mutation the engine
 `export_storage()`s and persists `{pubkey, blob}` (base64) **through the host `KeyStore`**
 (`pigeon.mls.state.v1`) — private key material stays under the platform keystore (Gotcha #1),
 never the app DB, never across the FFI as plaintext. Idempotent on at-least-once to-device
-delivery (Gotcha #8). **Two behaviours to know:** the **P1** guard — a send into an encrypted
-room whose group we don't hold yet is *held queued*, never downgraded to plaintext; and the
-**M4.3** backup — `create_backup`/`restore_from_backup` (recovery key + opaque AEAD blob). Any
-change here needs a **negative test** in the same commit (wrong key, tampered ciphertext,
-replay) — the crypto rule.
+delivery (Gotcha #8). **Behaviours to know:** the **P1** guard — a send into an encrypted
+room whose group we don't hold yet is *held queued*, never downgraded to plaintext; **finding
+C1** — `add_member` yields a Welcome (for the invitee) *and* a commit (broadcast to existing
+members as `p.mls.commit`), and `process_commit` applies an inbound commit so a third+ member's
+addition doesn't strand the earlier members a ratchet epoch behind; and the **M4.3** backup —
+`create_backup`/`restore_from_backup` (recovery key + opaque AEAD blob). Any change here needs a
+**negative test** in the same commit (wrong key, tampered ciphertext, replay) — the crypto rule.
 
 ### 3.8 `keys.rs` — device-key query/claim (M3.1+)
 
@@ -571,8 +577,8 @@ RoomListScreen (tap "Sign out") → AuthViewModel.logout()   SignedIn(signingOut
 
 These three are the worked examples; the messaging flows they set up for — **run one sync
 cycle**, **send a message (with local echo)**, and **invite to an encrypted room
-(claim → add_member → Welcome over `/sendToDevice`)** — are diagrammed in `ARCHITECTURE.md`
-§8, driving the same core FFI.
+(claim → add_member → Welcome over `/sendToDevice` + `p.mls.commit` broadcast)** — are
+diagrammed in `ARCHITECTURE.md` §8, driving the same core FFI.
 
 ---
 

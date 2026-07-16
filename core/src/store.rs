@@ -218,6 +218,30 @@ pub struct PendingDecrypt {
     pub ciphertext_b64: String,
 }
 
+/// A `p.mls.commit` event awaiting application (`pigeon-crypto` finding C1). An
+/// add-member broadcast the group's new epoch to existing members; each applies
+/// it in DAG order (before any later `p.room.encrypted` at the new epoch) via
+/// `process_commit`, exactly once. `sender` lets the caller skip its **own**
+/// commit (already self-merged on add).
+#[derive(Debug, Clone)]
+pub struct PendingCommit {
+    pub event_id: String,
+    pub room_id: String,
+    pub sender: String,
+    /// The base64 MLS commit (`content.commit`).
+    pub commit_b64: String,
+}
+
+/// One inbound MLS event awaiting processing — a message to decrypt or a commit to
+/// apply. [`Store::pending_mls`] yields these in one DAG-ordered stream so the
+/// ratchet advances correctly: a commit that changes the epoch is applied before
+/// the encrypted messages that follow it (Gotcha #3, finding C1).
+#[derive(Debug, Clone)]
+pub enum PendingMls {
+    Message(PendingDecrypt),
+    Commit(PendingCommit),
+}
+
 /// A room as it appears in the room list — current-state fields folded from the
 /// event log. Built in M2.1; the FFI-visible record and live updates are M2.3.
 #[derive(Debug, Clone, PartialEq)]
@@ -341,8 +365,12 @@ impl Store {
         // the send state of a local echo (0 for confirmed/synced events);
         // `decrypted`/`decrypt_state` carry the cached plaintext of an encrypted
         // event (M3.5).
+        // `p.mls.commit` events are MLS group plumbing (finding C1), not user
+        // content — they carry no renderable body, so exclude them from the
+        // timeline (and from pagination counts).
         let sql = "SELECT payload, local, decrypted, decrypt_state FROM events
                    WHERE room_id = ?1 AND (?2 IS NULL OR depth < ?2)
+                     AND type != 'p.mls.commit'
                    ORDER BY depth DESC, event_id DESC
                    LIMIT ?3";
         let mut stmt = guard.prepare(sql)?;
@@ -602,35 +630,59 @@ impl Store {
 
     // --- Encrypted-message plaintext cache (M3.5) ----------------------------
 
-    /// The `p.room.encrypted` events not yet decrypted, in DAG order (`depth ASC,
-    /// event_id ASC`). The MLS ratchet advances per decrypt and is order-sensitive
-    /// (Gotcha #3), so the caller must decrypt these in exactly this order and
-    /// exactly once. Events with no `content.ciphertext` are skipped (malformed —
-    /// they'd never decrypt).
-    pub fn pending_decrypts(&self) -> Result<Vec<PendingDecrypt>, StoreError> {
+    /// Inbound MLS events not yet processed — `p.room.encrypted` to decrypt and
+    /// `p.mls.commit` to apply — in one DAG-ordered stream (`depth ASC, event_id
+    /// ASC`). Both advance/depend on the MLS ratchet, which is order-sensitive
+    /// (Gotcha #3, finding C1): a commit that changes the group epoch must be
+    /// applied before the encrypted messages after it, so they share one ordering.
+    /// The caller processes each exactly once, marking it done via
+    /// [`set_decrypted`](Self::set_decrypted)/[`set_decrypt_failed`](Self::set_decrypt_failed)
+    /// (messages) or [`set_commit_processed`](Self::set_commit_processed) (commits).
+    /// Events with no `content.ciphertext`/`content.commit` are skipped (malformed).
+    pub fn pending_mls(&self) -> Result<Vec<PendingMls>, StoreError> {
         let guard = self.lock();
         let mut stmt = guard.prepare(
-            "SELECT event_id, room_id, json_extract(payload, '$.content.ciphertext')
+            "SELECT event_id, room_id, sender, type,
+                    json_extract(payload, '$.content.ciphertext'),
+                    json_extract(payload, '$.content.commit')
              FROM events
-             WHERE type = 'p.room.encrypted' AND decrypt_state = 0
+             WHERE type IN ('p.room.encrypted', 'p.mls.commit') AND decrypt_state = 0
              ORDER BY depth ASC, event_id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (event_id, room_id, ciphertext) = row?;
-            if let Some(ciphertext_b64) = ciphertext {
-                out.push(PendingDecrypt {
-                    event_id,
-                    room_id,
-                    ciphertext_b64,
-                });
+            let (event_id, room_id, sender, ty, ciphertext, commit) = row?;
+            match ty.as_str() {
+                "p.room.encrypted" => {
+                    if let Some(ciphertext_b64) = ciphertext {
+                        out.push(PendingMls::Message(PendingDecrypt {
+                            event_id,
+                            room_id,
+                            ciphertext_b64,
+                        }));
+                    }
+                }
+                "p.mls.commit" => {
+                    if let Some(commit_b64) = commit {
+                        out.push(PendingMls::Commit(PendingCommit {
+                            event_id,
+                            room_id,
+                            sender,
+                            commit_b64,
+                        }));
+                    }
+                }
+                _ => {}
             }
         }
         Ok(out)
@@ -654,6 +706,18 @@ impl Store {
         self.lock().execute(
             "UPDATE events SET decrypt_state = ?2 WHERE event_id = ?1",
             rusqlite::params![event_id, DECRYPT_FAILED],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a `p.mls.commit` event as processed (finding C1), so it's never
+    /// re-applied — the ratchet has advanced (or the commit didn't apply to us and
+    /// never will). Commits carry no plaintext and don't render; this only clears
+    /// them from [`pending_mls`](Self::pending_mls).
+    pub fn set_commit_processed(&self, event_id: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "UPDATE events SET decrypt_state = ?2 WHERE event_id = ?1",
+            rusqlite::params![event_id, DECRYPT_OK],
         )?;
         Ok(())
     }
@@ -1323,8 +1387,34 @@ mod tests {
         )
     }
 
+    fn commit(id: &str, room: &str, sender: &str, depth: i64, commit_b64: &str) -> Value {
+        event(
+            id,
+            room,
+            sender,
+            depth,
+            depth * 100,
+            "p.mls.commit",
+            None,
+            json!({ "commit": commit_b64 }),
+        )
+    }
+
+    /// The message (decrypt) entries of the unified pending-MLS stream.
+    fn pending_msgs(store: &Store) -> Vec<PendingDecrypt> {
+        store
+            .pending_mls()
+            .unwrap()
+            .into_iter()
+            .filter_map(|p| match p {
+                PendingMls::Message(m) => Some(m),
+                PendingMls::Commit(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn pending_decrypts_returns_encrypted_events_in_dag_order() {
+    fn pending_mls_returns_encrypted_events_in_dag_order() {
         let store = Store::open_in_memory().unwrap();
         store
             .apply_events(&[
@@ -1335,7 +1425,7 @@ mod tests {
             .unwrap();
 
         // Only encrypted events, oldest-first (ratchet order — Gotcha #3).
-        let pending = store.pending_decrypts().unwrap();
+        let pending = pending_msgs(&store);
         assert_eq!(
             pending
                 .iter()
@@ -1347,6 +1437,53 @@ mod tests {
     }
 
     #[test]
+    fn pending_mls_interleaves_commits_and_messages_in_dag_order() {
+        let store = Store::open_in_memory().unwrap();
+        // A commit (depth 2) sits between two encrypted messages — it must be
+        // yielded in DAG order so the caller applies it before the depth-3 message
+        // (finding C1). A plaintext message and a processed commit are excluded.
+        store
+            .apply_events(&[
+                encrypted("$e3", "!r:s", 3, "CT3"),
+                commit("$c", "!r:s", "@alice:s", 2, "COMMIT"),
+                encrypted("$e1", "!r:s", 1, "CT1"),
+                message("$m", "!r:s", "@a:s", 4, 400, "plaintext"),
+            ])
+            .unwrap();
+
+        let kinds: Vec<(&str, String)> = store
+            .pending_mls()
+            .unwrap()
+            .into_iter()
+            .map(|p| match p {
+                PendingMls::Message(m) => ("msg", m.event_id),
+                PendingMls::Commit(c) => ("commit", c.event_id),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("msg", "$e1".to_owned()),
+                ("commit", "$c".to_owned()),
+                ("msg", "$e3".to_owned())
+            ]
+        );
+
+        // A processed commit drops out of the stream; the commit never renders.
+        store.set_commit_processed("$c").unwrap();
+        assert!(store
+            .pending_mls()
+            .unwrap()
+            .iter()
+            .all(|p| !matches!(p, PendingMls::Commit(_))));
+        assert!(store
+            .timeline("!r:s", 10, None)
+            .unwrap()
+            .iter()
+            .all(|e| e.event_id != "$c"));
+    }
+
+    #[test]
     fn set_decrypted_caches_plaintext_and_clears_pending() {
         let store = Store::open_in_memory().unwrap();
         store
@@ -1354,13 +1491,13 @@ mod tests {
             .unwrap();
 
         // Before: pending, no cached plaintext in the timeline read.
-        assert_eq!(store.pending_decrypts().unwrap().len(), 1);
+        assert_eq!(pending_msgs(&store).len(), 1);
         assert_eq!(store.timeline("!r:s", 10, None).unwrap()[0].decrypted, None);
 
         store.set_decrypted("$e1", "hello").unwrap();
 
         // After: plaintext cached, no longer pending (never re-decrypt — Gotcha #3).
-        assert!(store.pending_decrypts().unwrap().is_empty());
+        assert!(pending_msgs(&store).is_empty());
         let tl = store.timeline("!r:s", 10, None).unwrap();
         assert_eq!(tl[0].decrypted.as_deref(), Some("hello"));
         assert!(!tl[0].decrypt_failed);
@@ -1374,7 +1511,7 @@ mod tests {
             .unwrap();
         store.set_decrypt_failed("$e1").unwrap();
 
-        assert!(store.pending_decrypts().unwrap().is_empty());
+        assert!(pending_msgs(&store).is_empty());
         let tl = store.timeline("!r:s", 10, None).unwrap();
         assert_eq!(tl[0].decrypted, None);
         assert!(tl[0].decrypt_failed);
@@ -1399,7 +1536,7 @@ mod tests {
             let store = Store::open(&path).unwrap();
             let tl = store.timeline("!r:s", 10, None).unwrap();
             assert_eq!(tl[0].decrypted.as_deref(), Some("persisted plaintext"));
-            assert!(store.pending_decrypts().unwrap().is_empty());
+            assert!(pending_msgs(&store).is_empty());
         }
         let _ = std::fs::remove_file(&path);
     }
