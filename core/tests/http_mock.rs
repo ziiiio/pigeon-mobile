@@ -624,6 +624,17 @@ async fn invite_to_encrypted_room_claims_keys_and_ships_welcome() {
         .expect(1)
         .mount(&server)
         .await;
+    // The add's commit is broadcast to existing members as a `p.mls.commit`
+    // room event (finding C1) — one per device added.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_pigeon/client/v1/rooms/!enc:test\.example/send/p\.mls\.commit/.+$",
+        ))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$commit" })))
+        .expect(1)
+        .mount(&server)
+        .await;
 
     alice
         .invite(room.clone(), "@bob:test.example".into())
@@ -651,6 +662,20 @@ async fn invite_to_encrypted_room_claims_keys_and_ships_welcome() {
     assert!(
         bob.has_group("!enc:test.example").unwrap(),
         "Bob holds the group after joining from the shipped Welcome"
+    );
+
+    // The broadcast commit carries the opaque MLS commit bytes (finding C1).
+    let commit_req = requests
+        .iter()
+        .find(|r| r.url.path().contains("/send/p.mls.commit/"))
+        .expect("a commit was broadcast to the room");
+    let commit_body: serde_json::Value = serde_json::from_slice(&commit_req.body).unwrap();
+    assert!(
+        !commit_body["commit"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "the p.mls.commit content carries the commit blob"
     );
 }
 
