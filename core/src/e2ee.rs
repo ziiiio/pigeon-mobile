@@ -607,6 +607,14 @@ mod tests {
         assert!(restored
             .restore_from_backup(&recovery_key, &STANDARD.encode(b"nope"))
             .is_err());
+        // Tampered blob (upstream C5): flip a byte deep in the AEAD ciphertext
+        // (well past the nonce prefix) — the *correct* recovery key must fail.
+        let mut tampered = STANDARD.decode(&blob).unwrap();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        assert!(restored
+            .restore_from_backup(&recovery_key, &STANDARD.encode(&tampered))
+            .is_err());
     }
 
     #[test]
