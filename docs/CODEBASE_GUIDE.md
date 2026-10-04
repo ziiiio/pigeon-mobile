@@ -352,7 +352,11 @@ idea (Gotcha #9): **the core pre-renders each `TimelineEvent`** — a message `b
 code never parses a Pigeon event. `send_message` is offline-first with **local echo**: it
 queues a provisional echo (`store.queue_send`) then flushes; `flush_pending` promotes the echo
 to the server's real `event_id` when the send confirms, so the authoritative event from
-`/sync` dedups (no dup, no flicker). **M3.4** added `create_encrypted_room`, and made `invite`
+`/sync` dedups (no dup, no flicker). Two races to know about: the sync loop also flushes, so
+passes are serialized by `send_lock` (otherwise a message went out twice); and `/sync` can
+deliver our own event *before* the ack — then `resolve_send` drops the echo but, for an
+encrypted event, first copies its plaintext onto the real event, because MLS can't decrypt
+our own ciphertext and the echo is the only readable copy. **M3.4** added `create_encrypted_room`, and made `invite`
 transparent — for a room whose MLS group we host it runs `claim_all_devices` → `add_member` →
 `/sendToDevice p.mls.welcome` per device, **and broadcasts the resulting `p.mls.commit` as a
 room event** so existing members advance to the new epoch (finding C1 — multi-member groups).

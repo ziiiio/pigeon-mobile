@@ -70,6 +70,11 @@ pub struct PigeonClient {
     /// `keys`, and `rooms` modules drive it. `None` only if the identity could
     /// not be created/restored (E2EE unavailable — plaintext still works).
     pub(crate) e2ee: Option<E2ee>,
+    /// Serializes [`flush_pending`](PigeonClient::flush_pending) passes. Both
+    /// `send_message` and the sync loop flush, and the server doesn't dedup on
+    /// txn id, so two overlapping passes would each transmit the same queued
+    /// message. Async because a pass holds it across the send request.
+    pub(crate) send_lock: tokio::sync::Mutex<()>,
 }
 
 #[uniffi::export]
@@ -397,6 +402,7 @@ fn finish_login(
         session,
         store,
         e2ee,
+        send_lock: tokio::sync::Mutex::new(()),
     }))
 }
 
@@ -497,6 +503,7 @@ pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
                 session,
                 store: open_store()?,
                 e2ee,
+                send_lock: tokio::sync::Mutex::new(()),
             });
             // Only publish if we minted a new identity (online path); a restored
             // identity's keys are already on the server.
@@ -530,6 +537,7 @@ pub async fn restore_session() -> Result<Option<Arc<PigeonClient>>, CoreError> {
                 session,
                 store: open_store()?,
                 e2ee,
+                send_lock: tokio::sync::Mutex::new(()),
             })))
         }
         // Any other server/protocol error is unexpected during a token check.

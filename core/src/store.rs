@@ -214,6 +214,8 @@ pub struct PendingSend {
 pub struct PendingDecrypt {
     pub event_id: String,
     pub room_id: String,
+    /// Who sent it — the decrypt pass recognises our own just-sent messages.
+    pub sender: String,
     /// The base64 MLS ciphertext (`content.ciphertext`).
     pub ciphertext_b64: String,
 }
@@ -563,28 +565,54 @@ impl Store {
         Ok(out)
     }
 
+    /// Whether `room_id` has a queued send not yet acknowledged by the server.
+    /// The decrypt pass uses it to leave our own just-sent ciphertext pending
+    /// while the ack (which carries its plaintext — see
+    /// [`resolve_send`](Self::resolve_send)) is still in flight.
+    pub fn has_pending_send(&self, room_id: &str) -> Result<bool, StoreError> {
+        let guard = self.lock();
+        let pending: i64 = guard.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_sends WHERE room_id = ?1)",
+            [room_id],
+            |r| r.get(0),
+        )?;
+        Ok(pending != 0)
+    }
+
     /// Mark a queued send acknowledged by the server under `real_event_id`.
     /// Promotes the provisional echo to the real id (so the authoritative event
     /// arriving via `/sync` dedups against it — no duplicate, no flicker), or
     /// drops the echo if sync already delivered that event. Clears the queue row.
+    ///
+    /// When sync raced ahead with our own **encrypted** event, the echo's body is
+    /// the only plaintext we will ever have for it — MLS can't decrypt a device's
+    /// own messages — so it is carried onto the real event as its cached
+    /// plaintext before the echo goes (overriding a failed decrypt attempt the
+    /// decrypt pass may already have made).
     pub fn resolve_send(&self, txn_id: &str, real_event_id: &str) -> Result<(), StoreError> {
         let mut guard = self.lock();
         let tx = guard.transaction()?;
-        let provisional: Option<String> = tx
+        let pending: Option<(String, String)> = tx
             .query_row(
-                "SELECT event_id FROM pending_sends WHERE txn_id = ?1",
+                "SELECT event_id, body FROM pending_sends WHERE txn_id = ?1",
                 [txn_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some(provisional) = provisional {
+        if let Some((provisional, body)) = pending {
             let real_exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)",
                 [real_event_id],
                 |r| r.get::<_, i64>(0),
             )? != 0;
             if real_exists {
-                // Sync raced ahead of the ack: drop the now-redundant echo.
+                // Sync raced ahead of the ack: keep our plaintext on the real
+                // event if it's ciphertext, then drop the now-redundant echo.
+                tx.execute(
+                    "UPDATE events SET decrypted = ?2, decrypt_state = ?3
+                      WHERE event_id = ?1 AND type = 'p.room.encrypted'",
+                    rusqlite::params![real_event_id, body, DECRYPT_OK],
+                )?;
                 tx.execute("DELETE FROM events WHERE event_id = ?1", [&provisional])?;
             } else {
                 // Promote the echo to the confirmed event in place — rewrite both
@@ -668,6 +696,7 @@ impl Store {
                         out.push(PendingMls::Message(PendingDecrypt {
                             event_id,
                             room_id,
+                            sender,
                             ciphertext_b64,
                         }));
                     }
@@ -1370,6 +1399,70 @@ mod tests {
         assert_eq!(tl.len(), 1);
         assert_eq!(tl[0].event_id, "$real");
         assert_eq!(tl[0].send_state, SendState::Confirmed);
+    }
+
+    fn own_encrypted(id: &str, room: &str, depth: i64) -> Value {
+        event(
+            id,
+            room,
+            "@me:s",
+            depth,
+            depth * 100,
+            "p.room.encrypted",
+            None,
+            json!({ "algorithm": "p.mls.1", "ciphertext": "CT" }),
+        )
+    }
+
+    // Our own encrypted message synced before the ack: the echo is the only
+    // plaintext we'll ever have (MLS can't decrypt our own messages), so it must
+    // survive onto the real event rather than be dropped.
+    #[test]
+    fn resolve_send_keeps_plaintext_when_encrypted_sync_raced_ahead() {
+        let store = Store::open_in_memory().unwrap();
+        let txn = store.queue_send("!r:s", "@me:s", "secret hi").unwrap();
+        store
+            .apply_events(&[own_encrypted("$real", "!r:s", 9)])
+            .unwrap();
+        store.resolve_send(&txn, "$real").unwrap();
+
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].event_id, "$real");
+        assert_eq!(tl[0].decrypted.as_deref(), Some("secret hi"));
+        assert!(!tl[0].decrypt_failed);
+        assert_eq!(tl[0].send_state, SendState::Confirmed);
+        // Nothing left for the decrypt pass to (fail to) decrypt.
+        assert!(store.pending_mls().unwrap().is_empty());
+    }
+
+    // The decrypt pass may already have tried — and failed — on our own event
+    // before the ack landed; resolving the send repairs it.
+    #[test]
+    fn resolve_send_repairs_an_own_event_already_marked_undecryptable() {
+        let store = Store::open_in_memory().unwrap();
+        let txn = store.queue_send("!r:s", "@me:s", "secret hi").unwrap();
+        store
+            .apply_events(&[own_encrypted("$real", "!r:s", 9)])
+            .unwrap();
+        store.set_decrypt_failed("$real").unwrap();
+        store.resolve_send(&txn, "$real").unwrap();
+
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].decrypted.as_deref(), Some("secret hi"));
+        assert!(!tl[0].decrypt_failed);
+    }
+
+    #[test]
+    fn has_pending_send_tracks_the_queue_per_room() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(!store.has_pending_send("!r:s").unwrap());
+        let txn = store.queue_send("!r:s", "@me:s", "hi").unwrap();
+        assert!(store.has_pending_send("!r:s").unwrap());
+        assert!(!store.has_pending_send("!other:s").unwrap());
+        store.resolve_send(&txn, "$real").unwrap();
+        assert!(!store.has_pending_send("!r:s").unwrap());
     }
 
     // --- Encrypted-message plaintext cache (M3.5) ----------------------------

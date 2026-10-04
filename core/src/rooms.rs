@@ -492,7 +492,14 @@ impl PigeonClient {
     /// (offline-first retry). A transport error stops the pass — the remaining
     /// sends stay queued for the next attempt; a server rejection fails that one
     /// send terminally and moves on.
+    ///
+    /// Passes are serialized (`send_lock`): the sync loop flushes while
+    /// `send_message`'s own flush may still be awaiting its ack, and since the
+    /// server doesn't dedup on txn id, an overlapping pass would read the same
+    /// queue row and transmit the message twice. The second pass waits, then
+    /// re-reads the queue and finds the send already resolved.
     pub async fn flush_pending(&self) -> Result<bool, CoreError> {
+        let _pass = self.send_lock.lock().await;
         let mut changed = false;
         for send in self.store.pending_sends()? {
             // Encrypt for a room whose MLS group we hold (M3.5): the message goes
@@ -635,6 +642,14 @@ impl PigeonClient {
                 crate::store::PendingMls::Message(msg) => {
                     // No group yet — leave it pending; a Welcome may still arrive.
                     if !e2ee.has_group(&msg.room_id)? {
+                        continue;
+                    }
+                    // Our own message synced before its send was acked: MLS can't
+                    // decrypt our own ciphertext, and the ack carries its plaintext
+                    // over from the echo (`resolve_send`). Leave it pending rather
+                    // than mark it undecryptable. (A message from another of our
+                    // devices just waits for the queue to drain, then decrypts.)
+                    if msg.sender == self_user && self.store.has_pending_send(&msg.room_id)? {
                         continue;
                     }
                     match e2ee.decrypt(&msg.room_id, &msg.ciphertext_b64) {
@@ -1105,6 +1120,124 @@ mod tests {
         assert!(
             !tl[0].pending && !tl[0].failed,
             "send confirmed after retry"
+        );
+    }
+
+    // `send_message` and the sync loop both flush; overlapping passes must not
+    // transmit the same queued message twice (the server doesn't dedup on txn id).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn overlapping_flushes_send_a_queued_message_once() {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@alice:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(&server)
+            .await;
+        let alice = crate::session::login(server.uri(), "alice".into(), "p".into())
+            .await
+            .unwrap();
+        // A slow ack keeps the first pass in flight while the second starts.
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.message/.+$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "event_id": "$real" }))
+                    .set_delay(std::time::Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+
+        alice.store.queue_send("!r:s", "@alice:s", "hi").unwrap();
+        let (a, b) = tokio::join!(alice.flush_pending(), alice.flush_pending());
+        a.unwrap();
+        b.unwrap();
+
+        let sends = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PUT")
+            .count();
+        assert_eq!(sends, 1, "the queued message must go out exactly once");
+        let tl = alice.timeline("!r:s".into(), 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert!(!tl[0].pending && !tl[0].failed);
+    }
+
+    /// Plays the homeserver for an encrypted send where `/sync` beats the ack:
+    /// before acknowledging, it delivers the sent ciphertext into the sender's
+    /// store and runs the sender's decrypt pass — exactly what the concurrent
+    /// sync loop does on a real device.
+    struct SyncBeatsAck(std::sync::Arc<PigeonClient>);
+
+    impl wiremock::Respond for SyncBeatsAck {
+        fn respond(&self, req: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let content: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            self.0
+                .store
+                .apply_events(&[json!({
+                    "event_id": "$real", "room_id": "!enc:s", "sender": "@alice:s",
+                    "type": "p.room.encrypted", "origin_server_ts": 100, "depth": 5,
+                    "content": content
+                })])
+                .unwrap();
+            self.0.process_inbound_mls().unwrap();
+            wiremock::ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$real" }))
+        }
+    }
+
+    // The bug seen on-device: our own encrypted message synced before its ack,
+    // the echo (the only plaintext — MLS can't decrypt our own messages) was
+    // dropped, and the message rendered "Unable to decrypt" for its own sender.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn own_encrypted_send_stays_readable_when_sync_beats_the_ack() {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@alice:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(&server)
+            .await;
+        let alice = crate::session::login(server.uri(), "alice".into(), "p".into())
+            .await
+            .unwrap();
+        alice.e2ee.as_ref().unwrap().create_group("!enc:s").unwrap();
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.encrypted/.+$"))
+            .respond_with(SyncBeatsAck(alice.clone()))
+            .mount(&server)
+            .await;
+
+        alice
+            .send_message("!enc:s".into(), "secret hi".into())
+            .await
+            .unwrap();
+
+        let tl = alice.timeline("!enc:s".into(), 10, None).unwrap();
+        assert_eq!(tl.len(), 1, "one message — the echo didn't linger");
+        assert_eq!(tl[0].event_id, "$real");
+        assert_eq!(tl[0].body.as_deref(), Some("secret hi"));
+        assert_eq!(tl[0].system_text, None, "no unable-to-decrypt placeholder");
+        assert!(!tl[0].pending && !tl[0].failed);
+        // A later decrypt pass has nothing left to (fail to) decrypt.
+        assert!(!alice.process_inbound_mls().unwrap());
+        assert_eq!(
+            alice.timeline("!enc:s".into(), 10, None).unwrap()[0]
+                .body
+                .as_deref(),
+            Some("secret hi")
         );
     }
 
