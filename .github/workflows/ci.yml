@@ -20,15 +20,18 @@ jobs:
     steps:
       # The core path-depends on ../pigeon/crates/*, so check both repos out as
       # siblings under the workspace (pigeon-mobile/ next to pigeon/).
-      # NOTE: set `repository` (and a token if private) to your homeserver repo.
+      # The homeserver repo is private, so the sibling checkout authenticates with
+      # a fine-grained PAT (read-only Contents on ziiiio/pigeon) stored as the
+      # PIGEON_REPO_TOKEN repo secret — the default GITHUB_TOKEN can only read
+      # this repo.
       - uses: actions/checkout@v4
         with:
           path: pigeon-mobile
       - uses: actions/checkout@v4
         with:
-          repository: your-org/pigeon
+          repository: ziiiio/pigeon
           path: pigeon
-          # token: ${{ secrets.PIGEON_REPO_TOKEN }}   # if the repo is private
+          token: ${{ secrets.PIGEON_REPO_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,9 +74,9 @@ jobs:
           path: pigeon-mobile
       - uses: actions/checkout@v4
         with:
-          repository: your-org/pigeon
+          repository: ziiiio/pigeon
           path: pigeon
-          # token: ${{ secrets.PIGEON_REPO_TOKEN }}   # if the repo is private
+          token: ${{ secrets.PIGEON_REPO_TOKEN }}
 
       - uses: actions/setup-java@v4
         with:
@@ -112,9 +115,9 @@ jobs:
           path: pigeon-mobile
       - uses: actions/checkout@v4
         with:
-          repository: your-org/pigeon
+          repository: ziiiio/pigeon
           path: pigeon
-          # token: ${{ secrets.PIGEON_REPO_TOKEN }}   # if the repo is private
+          token: ${{ secrets.PIGEON_REPO_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
