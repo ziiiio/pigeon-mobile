@@ -494,10 +494,11 @@ impl PigeonClient {
     /// send terminally and moves on.
     ///
     /// Passes are serialized (`send_lock`): the sync loop flushes while
-    /// `send_message`'s own flush may still be awaiting its ack, and since the
-    /// server doesn't dedup on txn id, an overlapping pass would read the same
-    /// queue row and transmit the message twice. The second pass waits, then
-    /// re-reads the queue and finds the send already resolved.
+    /// `send_message`'s own flush may still be awaiting its ack, and an
+    /// overlapping pass would read the same queue row and transmit it again —
+    /// re-encrypting it (a wasted ratchet step) and, against a server without
+    /// txn-id dedup, storing it twice. The second pass waits, then re-reads the
+    /// queue and finds the send already resolved.
     pub async fn flush_pending(&self) -> Result<bool, CoreError> {
         let _pass = self.send_lock.lock().await;
         let mut changed = false;
@@ -714,18 +715,44 @@ impl PigeonClient {
     }
 }
 
-/// A unique client transaction id for a to-device send. The server ignores it
-/// (it just identifies the attempt), so a process-local counter suffices.
+/// A fresh transaction id for a one-shot send (MLS commit broadcast, image
+/// message, to-device Welcome). The server dedups `/send` on txn id per device
+/// and room — a repeated id returns the *first* event and drops the new one —
+/// so ids must never repeat, including across app restarts: a bare process-local
+/// counter restarts at 0 and would collide with ids from an earlier run (which
+/// would silently swallow, say, a later commit broadcast). The millisecond
+/// timestamp separates runs; the counter separates sends within one.
 fn next_txn_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!("mob-td-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "mob-td-{millis}-{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // The server dedups /send on txn id, so a repeated id would silently drop a
+    // send. The counter alone resets every app launch; the timestamp component
+    // is what keeps ids from an earlier run from being reused.
+    #[test]
+    fn txn_ids_never_repeat_and_carry_a_timestamp() {
+        let a = next_txn_id();
+        let b = next_txn_id();
+        assert_ne!(a, b);
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.len(), 4, "mob-td-{{millis}}-{{n}}: {a}");
+        assert_eq!(&parts[..2], ["mob", "td"]);
+        assert!(parts[2].parse::<u128>().unwrap() > 0, "timestamp component");
+    }
 
     fn stored(
         event_type: &str,
@@ -1124,7 +1151,8 @@ mod tests {
     }
 
     // `send_message` and the sync loop both flush; overlapping passes must not
-    // transmit the same queued message twice (the server doesn't dedup on txn id).
+    // transmit the same queued message twice (the server dedups on txn id now,
+    // but a client must not lean on that to avoid double sends).
     #[tokio::test]
     #[serial_test::serial]
     async fn overlapping_flushes_send_a_queued_message_once() {

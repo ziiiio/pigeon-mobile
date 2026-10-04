@@ -71,9 +71,9 @@ pub struct PigeonClient {
     /// not be created/restored (E2EE unavailable — plaintext still works).
     pub(crate) e2ee: Option<E2ee>,
     /// Serializes [`flush_pending`](PigeonClient::flush_pending) passes. Both
-    /// `send_message` and the sync loop flush, and the server doesn't dedup on
-    /// txn id, so two overlapping passes would each transmit the same queued
-    /// message. Async because a pass holds it across the send request.
+    /// `send_message` and the sync loop flush; two overlapping passes would each
+    /// encrypt and transmit the same queued message (stored twice by a server
+    /// without txn-id dedup). Async because a pass holds it across the send.
     pub(crate) send_lock: tokio::sync::Mutex<()>,
 }
 

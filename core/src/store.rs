@@ -200,8 +200,8 @@ impl StoredEvent {
 /// until the server acks it; the sync loop retries these when online.
 #[derive(Debug, Clone)]
 pub struct PendingSend {
-    /// Client transaction id — identifies the attempt (the server ignores it, so
-    /// it's our own dedup key, not the server's).
+    /// Client transaction id, reused on every retry of this send — the server
+    /// dedups on it, so a retry after a lost response returns the original event.
     pub txn_id: String,
     pub room_id: String,
     pub body: String,

@@ -454,8 +454,9 @@ impl Api {
     /// `PUT /rooms/{room_id}/send/{event_type}/{txn_id}` → the event id. `content`
     /// is the raw event content (`{ body, msgtype }` for `p.room.message`, or
     /// `{ algorithm, ciphertext }` for `p.room.encrypted` — M3.5). The server
-    /// ignores `txn_id` (no server-side dedup — CLAUDE.md M2 note), so the client
-    /// dedups its own sends; the id still identifies the attempt in the path.
+    /// dedups on `txn_id` per (device, room): a retry under the same id returns
+    /// the original event id instead of storing a duplicate, so a queued send
+    /// keeps one id across all its attempts, and distinct sends need distinct ids.
     pub async fn send_event(
         &self,
         room_id: &str,
