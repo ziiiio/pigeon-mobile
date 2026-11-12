@@ -29,6 +29,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -151,7 +155,32 @@ fun ChatScreen(
         if (state.events.isNotEmpty()) listState.scrollToItem(state.events.lastIndex)
     }
 
+    // The last action's failure, shown as an error-coloured Material snackbar
+    // (above the composer) with a dismiss ✕. Keyed on the message: dismissing
+    // clears it in the VM; a new action clears it first (ChatViewModel.clearError)
+    // which restarts this effect, and cancelling `showSnackbar` removes the bar.
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(state.error) {
+        val message = state.error ?: return@LaunchedEffect
+        snackbar.showSnackbar(
+            message = message,
+            withDismissAction = true,
+            duration = SnackbarDuration.Indefinite,
+        )
+        onDismissError()
+    }
+
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(snackbar) { data ->
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    dismissActionContentColor = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        },
         topBar = {
             TopAppBar(
                 title = {
@@ -215,18 +244,6 @@ fun ChatScreen(
                 }
             }
 
-            // The last action's failure. Tap to dismiss; the next send/invite/
-            // attach also clears it (ChatViewModel.clearError).
-            state.error?.let {
-                Text(
-                    text = stringResource(R.string.chat_error_dismissable, it),
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .clickable(onClick = onDismissError)
-                        .padding(16.dp),
-                )
-            }
         }
     }
 

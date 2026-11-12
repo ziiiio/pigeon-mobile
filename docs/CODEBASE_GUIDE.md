@@ -515,8 +515,9 @@ UI rules both platforms must follow (each was once broken on one of them):
   iOS once drew every non-system event as a `MessageBubble`, so each new room opened with two
   empty "messages".
 - **A chat error belongs to the last action, not the screen.** `ChatViewModel.clearError()`
-  runs at the start of every send/invite/attach and when the user dismisses it (tap on
-  Android, the alert's OK on iOS). Before that, a failed invite's message never went away on
+  runs at the start of every send/invite/attach and when the user dismisses it (the ✕ on
+  Android's error-coloured `Snackbar` — `errorContainer` colours, in the `Scaffold`'s
+  `snackbarHost` above the composer — or the alert's OK on iOS). Before that, a failed invite's message never went away on
   Android — and on iOS it was recorded but never shown at all. The text comes from
   `chatErrorMessage` (in each platform's `ChatViewModel`), which branches on the `P_` code like
   `authErrorMessage` but rewords the codes whose sign-in wording misleads in a chat — a
