@@ -118,3 +118,53 @@ final class TimelineMergeTests: XCTestCase {
     }
 }
 
+// Backup/restore outcome messages (mirrors Android's BackupFeedbackTest).
+final class BackupFeedbackTests: XCTestCase {
+
+    private let everyVariant: [CoreError] = [
+        .Network(reason: "boom"),
+        .Api(code: .notFound, reason: "server said so"),
+        .Api(code: .forbidden, reason: "server said so"),
+        .Api(code: .unknownToken, reason: "server said so"),
+        .Api(code: .limitExceeded, reason: "server said so"),
+        .Api(code: .other(code: "P_FUTURE"), reason: "server said so"),
+        .Crypto(reason: "server said so"),
+        .Storage(reason: "server said so"),
+        .Protocol(reason: "server said so"),
+    ]
+
+    func testEveryFailureNamesTheActionAndNeverLeaksRawText() {
+        for e in everyVariant {
+            let b = backupErrorMessage(e), r = restoreErrorMessage(e)
+            XCTAssertTrue(b.hasPrefix("Backup failed"), b)
+            XCTAssertTrue(r.hasPrefix("Restore failed"), r)
+            XCTAssertFalse(b.contains("server said so"))
+            XCTAssertFalse(r.contains("server said so"))
+        }
+    }
+
+    func testRestoreDistinguishesNoBackupFromAWrongRecoveryKey() {
+        let noBackup = restoreErrorMessage(CoreError.Api(code: .notFound, reason: "x"))
+        let wrongKey = restoreErrorMessage(CoreError.Crypto(reason: "x"))
+        XCTAssertTrue(noBackup.contains("no key backup"), noBackup)
+        XCTAssertTrue(wrongKey.contains("recovery key doesn't match"), wrongKey)
+        XCTAssertNotEqual(noBackup, wrongKey)
+    }
+
+    func testForbiddenNeverReadsAsABadPassword() {
+        let e = CoreError.Api(code: .forbidden, reason: "x")
+        XCTAssertFalse(backupErrorMessage(e).contains("password"))
+        XCTAssertFalse(restoreErrorMessage(e).contains("password"))
+    }
+
+    func testWordingMatchesAndroidForTheKeyCases() {
+        // Lockstep with Android's RoomsViewModel.kt (same codes -> same wording).
+        XCTAssertEqual(restoreErrorMessage(CoreError.Crypto(reason: "x")),
+                       "Restore failed — that recovery key doesn't match your backup. Check it and try again.")
+        XCTAssertEqual(backupErrorMessage(CoreError.Network(reason: "x")),
+                       "Backup failed — couldn't reach the server. Check your connection and try again.")
+        XCTAssertEqual(restoreOK,
+                       "Encryption keys restored. New messages in your encrypted rooms will decrypt on this device.")
+    }
+}
+

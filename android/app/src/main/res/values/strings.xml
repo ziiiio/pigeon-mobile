@@ -32,8 +32,10 @@
     <string name="rooms_menu">More</string>
     <string name="backup_action">Back up encryption keys</string>
     <string name="restore_action">Restore from backup</string>
-    <string name="backup_title">Recovery key</string>
-    <string name="backup_message">Save this recovery key somewhere safe. It is the only way to restore your encrypted messages on a new device, and it is never sent to the server. It will not be shown again.</string>
+    <string name="backup_title">Backup saved</string>
+    <string name="backup_message">Your encryption keys are backed up to the server. Save this recovery key somewhere safe: it is the only way to restore your keys on a new device, it is never sent to the server, and it will not be shown again.</string>
+    <string name="backup_in_progress">Backing up encryption keys…</string>
+    <string name="restore_in_progress">Restoring encryption keys…</string>
     <string name="backup_done">Done</string>
     <string name="backup_copy">Copy</string>
     <string name="backup_copied">Recovery key copied</string>

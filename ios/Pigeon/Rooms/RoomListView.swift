@@ -74,6 +74,15 @@ struct RoomListView: View {
         } message: {
             Text(vm.state.actionError ?? "")
         }
+        // Success notices (e.g. a completed key restore) — the counterpart to the
+        // error alert, so every backup/restore attempt ends with visible feedback.
+        .alert("Done",
+               isPresented: Binding(get: { vm.state.notice != nil },
+                                    set: { if !$0 { vm.clearNotice() } })) {
+            Button("OK") { vm.clearNotice() }
+        } message: {
+            Text(vm.state.notice ?? "")
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -83,6 +92,18 @@ struct RoomListView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity).padding(6)
                     .background(Color.yellow.opacity(0.2))
+            }
+            // In-flight backup/restore: a banner (like the offline one) so the tap
+            // visibly did something; the menu actions are disabled meanwhile.
+            if vm.state.backupInProgress || vm.state.restoreInProgress {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(vm.state.backupInProgress ? "Backing up encryption keys…"
+                                                   : "Restoring encryption keys…")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity).padding(6)
+                .background(Color.accentColor.opacity(0.1))
             }
             if let signOutError {
                 Text(signOutError).font(.caption).foregroundStyle(.red)
@@ -158,7 +179,9 @@ struct RoomListView: View {
             Button { showingJoin = true } label: { Label("Join room", systemImage: "arrow.right.circle") }
             Divider()
             Button { vm.backup() } label: { Label("Back up keys", systemImage: "key") }
+                .disabled(vm.state.backupInProgress || vm.state.restoreInProgress)
             Button { showingRestore = true } label: { Label("Restore keys", systemImage: "arrow.clockwise") }
+                .disabled(vm.state.backupInProgress || vm.state.restoreInProgress)
         } label: {
             Image(systemName: "plus")
         }
@@ -250,6 +273,11 @@ private struct RecoveryKeySheet: View {
         NavigationView {
             Form {
                 Section {
+                    Label("Your encryption keys are backed up to the server.",
+                          systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                Section {
                     Text(recoveryKey)
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
@@ -260,12 +288,12 @@ private struct RecoveryKeySheet: View {
                         Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                     }
                 } footer: {
-                    Text("This is the only secret that can restore your encrypted messages on "
-                         + "a new device. Save it somewhere safe — it is never sent to the server "
-                         + "and won't be shown again.")
+                    Text("Save this recovery key somewhere safe: it is the only way to restore "
+                         + "your keys on a new device, it is never sent to the server, and it "
+                         + "won't be shown again.")
                 }
             }
-            .navigationTitle("Save your recovery key")
+            .navigationTitle("Backup saved")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done", action: onDone) }

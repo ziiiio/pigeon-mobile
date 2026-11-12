@@ -534,6 +534,16 @@ UI rules both platforms must follow (each was once broken on one of them):
   ids mix look-alike characters (`I`/`l`), so retyping one is error-prone. Both room lists
   show the id under the room name, and a **long-press copies it** (Android toast / iOS
   context menu).
+- **Every backup/restore attempt ends in visible feedback.** While it runs, a progress strip
+  (Android) / banner (iOS) shows and the menu actions are disabled (no double-taps). Success
+  says so: the recovery-key dialog/sheet is headed **"Backup saved"**, and a restore ends in a
+  notice that promises only what it delivers ("new messages … will decrypt" — not history).
+  Failure says *which* action failed and why, via `backupErrorMessage` / `restoreErrorMessage`
+  (each `RoomsViewModel`, same wording on both platforms). Those branch on the typed error, so
+  the core makes the two restore failures distinct: **no backup on the server** is
+  `Api { code: NotFound }`, a **wrong recovery key** is `Crypto`. Before this, Android showed
+  the raw exception as sticky red text, iOS used the *sign-in* messages (a 403 read "Incorrect
+  username or password"), and a successful restore showed nothing at all.
 - **A secret the user must save gets a Copy button, not just text.** The backup recovery key
   is shown once. Text in an Android `AlertDialog` is barely selectable (the dialog is its own
   window, so the selection toolbar often never appears) and iOS alert text can't be selected

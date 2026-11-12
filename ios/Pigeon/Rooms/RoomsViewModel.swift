@@ -19,6 +19,12 @@ struct RoomsState {
     /// (M4.3) — the only secret that can restore the backup; it never reaches the
     /// server. Cleared when the sheet dismisses.
     var recoveryKey: String?
+    /// A key backup / restore is in flight — the UI shows progress and disables
+    /// the actions.
+    var backupInProgress = false
+    var restoreInProgress = false
+    /// A transient success message to surface then dismiss (e.g. "keys restored").
+    var notice: String?
 }
 
 @MainActor
@@ -75,23 +81,38 @@ final class RoomsViewModel: ObservableObject {
     /// Back up the device's encryption keys (M4.3). The returned recovery key is
     /// shown once for the user to save; it never reaches the server (Gotcha #1).
     func backup() {
+        guard !state.backupInProgress else { return }
+        // Clear any stale outcome so the user sees *this* attempt's result.
+        state.backupInProgress = true
+        state.actionError = nil
+        state.notice = nil
         Task {
+            // Success: the recovery-key sheet opens, titled "Backup saved".
             do { state.recoveryKey = try await client.backup() }
-            catch { state.actionError = message(error) }
+            catch { state.actionError = backupErrorMessage(error) }
+            state.backupInProgress = false
         }
     }
 
     /// Restore the device's encryption keys from the server-side backup using the
     /// user's recovery key (M4.3). Recovered groups/identity surface via sync.
     func restoreBackup(_ recoveryKey: String) {
+        guard !state.restoreInProgress else { return }
+        state.restoreInProgress = true
+        state.actionError = nil
+        state.notice = nil
         Task {
-            do { try await client.restoreBackup(recoveryKey: recoveryKey.trimmed) }
-            catch { state.actionError = message(error) }
+            do {
+                try await client.restoreBackup(recoveryKey: recoveryKey.trimmed)
+                state.notice = restoreOK
+            } catch { state.actionError = restoreErrorMessage(error) }
+            state.restoreInProgress = false
         }
     }
 
     func clearRecoveryKey() { state.recoveryKey = nil }
     func clearError() { state.actionError = nil }
+    func clearNotice() { state.notice = nil }
 
     private func message(_ error: Error) -> String { authErrorMessage(error) }
 }
@@ -104,3 +125,49 @@ extension String {
         return t.isEmpty ? nil : t
     }
 }
+
+/// Shown after a successful restore. Honest about scope: restoring brings back the
+/// device's identity + room memberships (new messages decrypt), not history that
+/// forward secrecy already destroyed. Mirrors Android's `RESTORE_OK`.
+let restoreOK =
+    "Encryption keys restored. New messages in your encrypted rooms will decrypt on this device."
+
+/// The message for a failed key **backup** (M4.3). Branches on the typed error
+/// (never on text) and never shows the raw error. Mirrors Android's
+/// `backupErrorMessage` — keep the wording in lockstep.
+func backupErrorMessage(_ error: Error) -> String {
+    guard let core = error as? CoreError else { return "Backup failed — something went wrong." }
+    switch core {
+    case .Network: return "Backup failed — couldn't reach the server. Check your connection and try again."
+    case let .Api(code, _):
+        switch code {
+        case .unknownToken, .missingToken: return "Backup failed — your session has expired. Sign in again, then retry."
+        case .limitExceeded: return "Backup failed — too many attempts. Wait a moment and try again."
+        default: return "Backup failed — the server rejected it. Try again later."
+        }
+    case .Crypto: return "Backup failed — this device's encryption keys couldn't be prepared."
+    case .Storage: return "Backup failed — couldn't access secure storage on this device."
+    case .Protocol: return "Backup failed — unexpected response from the server."
+    }
+}
+
+/// The message for a failed key **restore** (M4.3). A missing backup (`.notFound`)
+/// and a wrong recovery key (`.Crypto`) are distinct typed errors from the core,
+/// so each gets its own advice. Mirrors Android's `restoreErrorMessage`.
+func restoreErrorMessage(_ error: Error) -> String {
+    guard let core = error as? CoreError else { return "Restore failed — something went wrong." }
+    switch core {
+    case .Crypto: return "Restore failed — that recovery key doesn't match your backup. Check it and try again."
+    case .Network: return "Restore failed — couldn't reach the server. Check your connection and try again."
+    case let .Api(code, _):
+        switch code {
+        case .notFound: return "Restore failed — there's no key backup for this account yet. Back up from a device that still has your keys."
+        case .unknownToken, .missingToken: return "Restore failed — your session has expired. Sign in again, then retry."
+        case .limitExceeded: return "Restore failed — too many attempts. Wait a moment and try again."
+        default: return "Restore failed — the server rejected it. Try again later."
+        }
+    case .Storage: return "Restore failed — couldn't access secure storage on this device."
+    case .Protocol: return "Restore failed — unexpected response from the server."
+    }
+}
+

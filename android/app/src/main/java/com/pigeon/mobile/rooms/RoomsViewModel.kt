@@ -1,5 +1,6 @@
 package com.pigeon.mobile.rooms
 
+import uniffi.pigeon_mobile_core.ErrorCode
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +26,12 @@ data class RoomsState(
      * (M4.3). The user must save it — it's the only secret that can restore the
      * backup, and it never reaches the server. Cleared when the dialog dismisses. */
     val recoveryKey: String? = null,
+    /** A key backup is in flight — the UI shows progress and disables the action. */
+    val backupInProgress: Boolean = false,
+    /** A key restore is in flight — same. */
+    val restoreInProgress: Boolean = false,
+    /** A transient success message to surface then dismiss (e.g. "keys restored"). */
+    val notice: String? = null,
 )
 
 /**
@@ -106,11 +113,15 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
      * recovery key, a distinct user-facing secret the user must save.
      */
     fun backup() {
+        if (_state.value.backupInProgress) return
+        // Clear any stale outcome so the user sees *this* attempt's result.
+        _state.value = _state.value.copy(backupInProgress = true, actionError = null, notice = null)
         viewModelScope.launch {
             _state.value = try {
-                _state.value.copy(recoveryKey = client.backup())
+                // Success: the recovery-key dialog opens, headed "Backup saved".
+                _state.value.copy(backupInProgress = false, recoveryKey = client.backup())
             } catch (e: CoreException) {
-                _state.value.copy(actionError = e.message)
+                _state.value.copy(backupInProgress = false, actionError = backupErrorMessage(e))
             }
         }
     }
@@ -118,13 +129,21 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
     /** Restore the device's encryption keys from the server-side backup using the
      * user's recovery key (M4.3). Recovered groups/identity surface via sync. */
     fun restoreBackup(recoveryKey: String) {
+        if (_state.value.restoreInProgress) return
+        _state.value = _state.value.copy(restoreInProgress = true, actionError = null, notice = null)
         viewModelScope.launch {
-            try {
+            _state.value = try {
                 client.restoreBackup(recoveryKey.trim())
+                _state.value.copy(restoreInProgress = false, notice = RESTORE_OK)
             } catch (e: CoreException) {
-                _state.value = _state.value.copy(actionError = e.message)
+                _state.value.copy(restoreInProgress = false, actionError = restoreErrorMessage(e))
             }
         }
+    }
+
+    /** Dismiss a shown success notice. */
+    fun clearNotice() {
+        _state.value = _state.value.copy(notice = null)
     }
 
     /** Dismiss the shown recovery key (the user has saved it). */
@@ -136,3 +155,45 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
         _state.value = _state.value.copy(actionError = null)
     }
 }
+
+/** Shown after a successful restore. Honest about scope: restoring brings back the
+ * device's identity + room memberships (new messages decrypt), not history that
+ * forward secrecy already destroyed — see design/history-backup.md in ../pigeon. */
+internal const val RESTORE_OK =
+    "Encryption keys restored. New messages in your encrypted rooms will decrypt on this device."
+
+/**
+ * The message for a failed key **backup** (M4.3). Branches on the typed error
+ * (never on text, CLAUDE.md) and never shows the raw exception. Mirrors iOS
+ * `backupErrorMessage` — keep the wording in lockstep.
+ */
+fun backupErrorMessage(e: CoreException): String = when (e) {
+    is CoreException.Network -> "Backup failed — couldn't reach the server. Check your connection and try again."
+    is CoreException.Api -> when (e.code) {
+        is ErrorCode.UnknownToken, is ErrorCode.MissingToken -> "Backup failed — your session has expired. Sign in again, then retry."
+        is ErrorCode.LimitExceeded -> "Backup failed — too many attempts. Wait a moment and try again."
+        else -> "Backup failed — the server rejected it. Try again later."
+    }
+    is CoreException.Crypto -> "Backup failed — this device's encryption keys couldn't be prepared."
+    is CoreException.Storage -> "Backup failed — couldn't access secure storage on this device."
+    is CoreException.Protocol -> "Backup failed — unexpected response from the server."
+}
+
+/**
+ * The message for a failed key **restore** (M4.3). A missing backup (`NotFound`)
+ * and a wrong recovery key (`Crypto`) are distinct typed errors from the core, so
+ * each gets its own advice. Mirrors iOS `restoreErrorMessage`.
+ */
+fun restoreErrorMessage(e: CoreException): String = when (e) {
+    is CoreException.Crypto -> "Restore failed — that recovery key doesn't match your backup. Check it and try again."
+    is CoreException.Network -> "Restore failed — couldn't reach the server. Check your connection and try again."
+    is CoreException.Api -> when (e.code) {
+        is ErrorCode.NotFound -> "Restore failed — there's no key backup for this account yet. Back up from a device that still has your keys."
+        is ErrorCode.UnknownToken, is ErrorCode.MissingToken -> "Restore failed — your session has expired. Sign in again, then retry."
+        is ErrorCode.LimitExceeded -> "Restore failed — too many attempts. Wait a moment and try again."
+        else -> "Restore failed — the server rejected it. Try again later."
+    }
+    is CoreException.Storage -> "Restore failed — couldn't access secure storage on this device."
+    is CoreException.Protocol -> "Restore failed — unexpected response from the server."
+}
+

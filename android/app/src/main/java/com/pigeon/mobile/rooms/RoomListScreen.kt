@@ -17,6 +17,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarVisuals
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -132,6 +138,8 @@ fun RoomListRoute(
             onBackup = vm::backup,
             onRestore = vm::restoreBackup,
             onRecoveryKeyDismiss = vm::clearRecoveryKey,
+            onDismissError = vm::clearError,
+            onDismissNotice = vm::clearNotice,
             onSignOut = onSignOut,
         )
     }
@@ -150,14 +158,58 @@ fun RoomListScreen(
     onBackup: () -> Unit,
     onRestore: (String) -> Unit,
     onRecoveryKeyDismiss: () -> Unit,
+    onDismissError: () -> Unit,
+    onDismissNotice: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var showCreate by rememberSaveable { mutableStateOf(false) }
     var showJoin by rememberSaveable { mutableStateOf(false) }
     var showMenu by rememberSaveable { mutableStateOf(false) }
     var showRestore by rememberSaveable { mutableStateOf(false) }
+    val busy = state.backupInProgress || state.restoreInProgress
+
+    // Action outcomes as snackbars (above the FAB): failures in error colours
+    // with a dismiss ✕ that stay until dismissed or the next attempt; success
+    // notices in the default style, auto-dismissing. Keyed on the message, so a
+    // new outcome replaces the old one (restarting the effect cancels and
+    // removes the previous bar).
+    val snackbar = remember { SnackbarHostState() }
+    val error = state.actionError ?: signOutError
+    LaunchedEffect(error) {
+        val message = error ?: return@LaunchedEffect
+        snackbar.showSnackbar(FeedbackVisuals(message, isError = true))
+        onDismissError()
+    }
+    LaunchedEffect(state.notice) {
+        val message = state.notice ?: return@LaunchedEffect
+        snackbar.showSnackbar(FeedbackVisuals(message, isError = false))
+        onDismissNotice()
+    }
 
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(snackbar) { data ->
+                val isError = (data.visuals as? FeedbackVisuals)?.isError == true
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = if (isError) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.inverseSurface
+                    },
+                    contentColor = if (isError) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.inverseOnSurface
+                    },
+                    dismissActionContentColor = if (isError) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.inverseOnSurface
+                    },
+                )
+            }
+        },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.rooms_title)) },
@@ -184,6 +236,7 @@ fun RoomListScreen(
                         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.backup_action)) },
+                                enabled = !busy,
                                 onClick = {
                                     showMenu = false
                                     onBackup()
@@ -191,6 +244,7 @@ fun RoomListScreen(
                             )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.restore_action)) },
+                                enabled = !busy,
                                 onClick = {
                                     showMenu = false
                                     showRestore = true
@@ -236,15 +290,20 @@ fun RoomListScreen(
                 }
             }
 
-            val error = state.actionError ?: signOutError
-            if (error != null) {
-                Text(
-                    text = error,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(16.dp),
-                )
+            // In-flight backup/restore: a progress strip under the top bar, so
+            // the tap visibly did something (the actions are disabled meanwhile).
+            if (busy) {
+                Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(
+                        text = stringResource(
+                            if (state.backupInProgress) R.string.backup_in_progress else R.string.restore_in_progress,
+                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
             }
         }
     }
@@ -502,3 +561,19 @@ private fun JoinRoomDialog(onDismiss: () -> Unit, onJoin: (String) -> Unit) {
         },
     )
 }
+
+/**
+ * Snackbar content for an action outcome: the message plus whether it's a
+ * failure (error colours, stays until dismissed) or a success notice (default
+ * colours, auto-dismisses). Both carry a dismiss ✕.
+ */
+private class FeedbackVisuals(
+    override val message: String,
+    val isError: Boolean,
+) : SnackbarVisuals {
+    override val actionLabel: String? = null
+    override val withDismissAction: Boolean = true
+    override val duration: SnackbarDuration =
+        if (isError) SnackbarDuration.Indefinite else SnackbarDuration.Long
+}
+

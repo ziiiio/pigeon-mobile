@@ -201,13 +201,18 @@ impl PigeonClient {
     /// using the user's `recovery_key`. Fetches the encrypted blob, decrypts it,
     /// **replaces** this session's freshly-minted identity with the recovered one,
     /// and re-publishes its keys so peers can reach it. Errors if there's no backup
-    /// on the server or the recovery key is wrong (AEAD decryption fails cleanly).
+    /// on the server (`CoreError::Api { code: NotFound }`) or the recovery key is
+    /// wrong (`CoreError::Crypto` — AEAD decryption fails cleanly).
     pub async fn restore_backup(&self, recovery_key: String) -> Result<(), CoreError> {
         let blob = self
             .api
             .get_room_key(BACKUP_ROOM, BACKUP_SESSION)
             .await?
-            .ok_or_else(|| CoreError::Crypto {
+            // Typed NOT_FOUND (not Crypto): "no backup yet" needs different advice
+            // from "wrong recovery key" (which fails as Crypto below), and the UI
+            // branches on the code, never on text.
+            .ok_or_else(|| CoreError::Api {
+                code: ErrorCode::NotFound,
                 reason: "no encryption-key backup found on the server".to_owned(),
             })?;
         self.e2ee()?.restore_from_backup(&recovery_key, &blob)?;

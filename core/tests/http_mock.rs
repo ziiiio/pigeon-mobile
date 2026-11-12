@@ -822,9 +822,15 @@ async fn restore_backup_errors_when_no_backup_on_server() {
         .mount(&server)
         .await;
 
+    // A missing backup is a typed NOT_FOUND, distinct from a wrong recovery key
+    // (Crypto) — the UI tells the user "no backup yet" vs "check the key"
+    // without reading error text.
     match client.restore_backup("cmVjb3Zlcnk=".into()).await {
-        Err(CoreError::Crypto { .. }) => {}
-        other => panic!("expected a Crypto error for a missing backup, got {other:?}"),
+        Err(CoreError::Api {
+            code: ErrorCode::NotFound,
+            ..
+        }) => {}
+        other => panic!("expected Api(NotFound) for a missing backup, got {other:?}"),
     }
 }
 
