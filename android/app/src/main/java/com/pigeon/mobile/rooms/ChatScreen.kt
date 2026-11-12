@@ -97,6 +97,7 @@ fun ChatRoute(
         onSend = vm::send,
         onInvite = vm::invite,
         onSendImage = vm::sendImage,
+        onDismissError = vm::clearError,
         download = vm::downloadImage,
     )
 }
@@ -113,6 +114,7 @@ fun ChatScreen(
     onSend: (String) -> Unit,
     onInvite: (String) -> Unit,
     onSendImage: (ByteArray, String, Int, Int) -> Unit,
+    onDismissError: () -> Unit,
     download: suspend (ImageContent) -> ByteArray?,
 ) {
     val listState = rememberLazyListState()
@@ -213,12 +215,15 @@ fun ChatScreen(
                 }
             }
 
+            // The last action's failure. Tap to dismiss; the next send/invite/
+            // attach also clears it (ChatViewModel.clearError).
             state.error?.let {
                 Text(
-                    text = it,
+                    text = stringResource(R.string.chat_error_dismissable, it),
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
+                        .clickable(onClick = onDismissError)
                         .padding(16.dp),
                 )
             }

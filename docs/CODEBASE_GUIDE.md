@@ -504,7 +504,20 @@ core. `ChatViewModel` + `ChatScreen` are the timeline: bubbles aligned by sender
 local-echo state ("Sending…"/"Not sent"), an **Attach** action (the system photo picker) and
 inline image thumbnails, and a 🔒 badge for encrypted rooms. Note what's *absent*: no event
 parsing, no crypto, no request bodies — every bubble is a core-rendered `TimelineEvent`
-(Gotcha #9). **iOS (M5)** mirrors all of this in SwiftUI under `ios/Pigeon/` over the *same*
+(Gotcha #9).
+
+UI rules both platforms must follow (each was once broken on one of them):
+
+- **A chat error belongs to the last action, not the screen.** `ChatViewModel.clearError()`
+  runs at the start of every send/invite/attach and when the user dismisses it (tap on
+  Android, the alert's OK on iOS). Before that, a failed invite's message never went away on
+  Android — and on iOS it was recorded but never shown at all. The text comes from
+  `chatErrorMessage` (in each platform's `ChatViewModel`), which branches on the `P_` code like
+  `authErrorMessage` but rewords the codes whose sign-in wording misleads in a chat — a
+  malformed invitee id (`InvalidUsername`) and a refused action (`Forbidden`). Android used to
+  show the raw `e.message` (`code=uniffi…ErrorCode$InvalidUsername@…`).
+
+**iOS (M5)** mirrors all of this in SwiftUI under `ios/Pigeon/` over the *same*
 core — see `ARCHITECTURE.md` §6.
 
 ---

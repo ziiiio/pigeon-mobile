@@ -43,6 +43,20 @@ struct ChatView: View {
         .sheet(isPresented: $showingInvite) {
             InviteSheet { vm.invite($0) }
         }
+        // Surface the last action's failure (e.g. a rejected invite) — it used to
+        // be recorded in `state.error` but never shown, so failures were silent.
+        // Dismissing clears it (mirrors Android's tap-to-dismiss).
+        .alert(
+            "Something went wrong",
+            isPresented: Binding(
+                get: { vm.state.error != nil },
+                set: { if !$0 { vm.clearError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) { vm.clearError() }
+        } message: {
+            Text(vm.state.error ?? "")
+        }
     }
 
     private var timelineList: some View {

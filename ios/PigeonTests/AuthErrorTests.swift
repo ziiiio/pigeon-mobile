@@ -61,4 +61,29 @@ final class AuthErrorTests: XCTestCase {
         struct Weird: Error {}
         XCTAssertEqual(authErrorMessage(Weird()), "Something went wrong.")
     }
+
+    // chatErrorMessage — the chat-screen mapper (mirrors Android's ChatErrorTest).
+
+    func testChatMalformedInviteeIdExplainsTheIdFormat() {
+        let msg = chatErrorMessage(CoreError.Api(code: .invalidUsername,
+                                                 reason: "identifier must start with sigil '@'"))
+        XCTAssertTrue(msg.contains("user ID"), msg)
+        XCTAssertFalse(msg.contains("Usernames may use"), "must not read as a sign-in error")
+    }
+
+    func testChatForbiddenIsAPermissionError() {
+        let msg = chatErrorMessage(CoreError.Api(code: .forbidden, reason: "not joined"))
+        XCTAssertTrue(msg.contains("permission"), msg)
+        XCTAssertFalse(msg.contains("password"))
+    }
+
+    func testChatNeverLeaksTheRawReason() {
+        XCTAssertFalse(chatErrorMessage(CoreError.Api(code: .invalidUsername, reason: "server said so"))
+            .contains("server said so"))
+    }
+
+    func testChatOtherErrorsFallBackToSharedWording() {
+        let e = CoreError.Network(reason: "boom")
+        XCTAssertEqual(chatErrorMessage(e), authErrorMessage(e))
+    }
 }

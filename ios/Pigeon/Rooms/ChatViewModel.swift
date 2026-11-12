@@ -44,8 +44,15 @@ final class ChatViewModel: ObservableObject {
             state.events = merge(state.events, newest)
         } catch {
             state.loading = false
-            state.error = authErrorMessage(error)
+            state.error = chatErrorMessage(error)
         }
+    }
+
+    /// Drop the shown error — when the user dismisses the alert, and at the start
+    /// of every user action (send / invite / attach) so an earlier failure doesn't
+    /// linger over a later one. Mirrors Android's `ChatViewModel.clearError`.
+    func clearError() {
+        state.error = nil
     }
 
     /// Page backwards from the oldest loaded event (scroll-to-load-older).
@@ -56,7 +63,7 @@ final class ChatViewModel: ObservableObject {
             if older.isEmpty { state.atTop = true }
             else { state.events = merge(older, state.events) }
         } catch {
-            state.error = authErrorMessage(error)
+            state.error = chatErrorMessage(error)
         }
     }
 
@@ -66,9 +73,10 @@ final class ChatViewModel: ObservableObject {
     func send(_ body: String) {
         let text = body.trimmed
         guard !text.isEmpty else { return }
+        clearError()
         Task {
             do { try await client.sendMessage(roomId: roomId, body: text) }
-            catch { state.error = authErrorMessage(error) }
+            catch { state.error = chatErrorMessage(error) }
             refresh()
         }
     }
@@ -77,9 +85,10 @@ final class ChatViewModel: ObservableObject {
     func invite(_ userId: String) {
         let id = userId.trimmed
         guard !id.isEmpty else { return }
+        clearError()
         Task {
             do { try await client.invite(roomId: roomId, userId: id) }
-            catch { state.error = authErrorMessage(error) }
+            catch { state.error = chatErrorMessage(error) }
             refresh()
         }
     }
@@ -89,11 +98,12 @@ final class ChatViewModel: ObservableObject {
     /// encrypted-then-uploaded blob with the per-file key inside the E2EE message).
     /// All crypto/protocol stays in the core.
     func sendImage(bytes: Data, mimetype: String, width: UInt32, height: UInt32) {
+        clearError()
         Task {
             do {
                 try await client.sendImage(roomId: roomId, bytes: bytes, mimetype: mimetype,
                                            width: width, height: height, caption: "")
-            } catch { state.error = authErrorMessage(error) }
+            } catch { state.error = chatErrorMessage(error) }
             refresh()
         }
     }
@@ -112,4 +122,25 @@ final class ChatViewModel: ObservableObject {
             .filter { seen.insert($0.eventId).inserted }
             .sorted { $0.cursor < $1.cursor }
     }
+}
+
+/// The user-facing message for a failed chat action (send / invite / attach /
+/// timeline read). Branches on the typed `P_` code, never on error text, and
+/// never shows the raw error. Reuses `authErrorMessage` except where its sign-in
+/// wording would mislead in a chat: a malformed invitee id comes back as
+/// `.invalidUsername` ("Usernames may use only…") and a refused action as
+/// `.forbidden` ("Incorrect username or password"). Mirrors Android's
+/// `chatErrorMessage` — keep the wording in lockstep.
+func chatErrorMessage(_ error: Error) -> String {
+    if case let .Api(code, _)? = error as? CoreError {
+        switch code {
+        case .invalidUsername:
+            return "That isn't a valid user ID. Use the full form, e.g. @bob:localhost."
+        case .forbidden:
+            return "You don't have permission to do that in this room."
+        default:
+            break
+        }
+    }
+    return authErrorMessage(error)
 }

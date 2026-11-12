@@ -1,5 +1,7 @@
 package com.pigeon.mobile.rooms
 
+import com.pigeon.mobile.auth.authErrorMessage
+import uniffi.pigeon_mobile_core.ErrorCode
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -62,9 +64,19 @@ class ChatViewModel(
                 val newest = withContext(Dispatchers.IO) { client.timeline(roomId, PAGE, null) }
                 _state.value.copy(loading = false, events = merge(_state.value.events, newest))
             } catch (e: CoreException) {
-                _state.value.copy(loading = false, error = e.message)
+                _state.value.copy(loading = false, error = chatErrorMessage(e))
             }
         }
+    }
+
+    /**
+     * Drop the shown error. Called when the user taps it away, and at the start of
+     * every user action (send / invite / attach) so a failure from an earlier
+     * action doesn't linger over a later one — the error is about the last thing
+     * the user did, not a sticky banner.
+     */
+    fun clearError() {
+        _state.value = _state.value.copy(error = null)
     }
 
     /** Page backwards from the oldest loaded event (scroll-to-load-older). */
@@ -81,7 +93,7 @@ class ChatViewModel(
                     _state.value.copy(events = merge(older, _state.value.events))
                 }
             } catch (e: CoreException) {
-                _state.value.copy(error = e.message)
+                _state.value.copy(error = chatErrorMessage(e))
             }
         }
     }
@@ -94,11 +106,12 @@ class ChatViewModel(
     fun send(body: String) {
         val text = body.trim()
         if (text.isEmpty()) return
+        clearError()
         viewModelScope.launch {
             try {
                 client.sendMessage(roomId, text)
             } catch (e: CoreException) {
-                _state.value = _state.value.copy(error = e.message)
+                _state.value = _state.value.copy(error = chatErrorMessage(e))
             }
             refresh()
         }
@@ -113,11 +126,12 @@ class ChatViewModel(
     fun invite(userId: String) {
         val id = userId.trim()
         if (id.isEmpty()) return
+        clearError()
         viewModelScope.launch {
             try {
                 client.invite(roomId, id)
             } catch (e: CoreException) {
-                _state.value = _state.value.copy(error = e.message)
+                _state.value = _state.value.copy(error = chatErrorMessage(e))
             }
             refresh()
         }
@@ -131,13 +145,14 @@ class ChatViewModel(
      * The image appears once the sync loop delivers it.
      */
     fun sendImage(bytes: ByteArray, mimetype: String, width: Int, height: Int) {
+        clearError()
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     client.sendImage(roomId, bytes, mimetype, width.toUInt(), height.toUInt(), "")
                 }
             } catch (e: CoreException) {
-                _state.value = _state.value.copy(error = e.message)
+                _state.value = _state.value.copy(error = chatErrorMessage(e))
             }
             refresh()
         }
@@ -156,4 +171,20 @@ class ChatViewModel(
     /** Union two pages by event id and order by the opaque cursor (DAG depth). */
     private fun merge(a: List<TimelineEvent>, b: List<TimelineEvent>): List<TimelineEvent> =
         (a + b).distinctBy { it.eventId }.sortedBy { it.cursor }
+}
+
+/**
+ * The user-facing message for a failed chat action (send / invite / attach /
+ * timeline read). Branches on the typed `P_` code, never on error text
+ * (CLAUDE.md), and never shows the raw exception. Reuses [authErrorMessage] except
+ * where its sign-in wording would mislead in a chat: a malformed invitee id comes
+ * back as `InvalidUsername` ("Usernames may use only…"), and a refused action as
+ * `Forbidden` ("Incorrect username or password"). Mirrors iOS `chatErrorMessage`.
+ */
+fun chatErrorMessage(e: CoreException): String = when {
+    e is CoreException.Api && e.code is ErrorCode.InvalidUsername ->
+        "That isn't a valid user ID. Use the full form, e.g. @bob:localhost."
+    e is CoreException.Api && e.code is ErrorCode.Forbidden ->
+        "You don't have permission to do that in this room."
+    else -> authErrorMessage(e)
 }
