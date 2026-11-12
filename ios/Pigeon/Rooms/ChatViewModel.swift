@@ -39,9 +39,13 @@ final class ChatViewModel: ObservableObject {
     /// Re-read the newest page and merge it with what's already loaded.
     func refresh() {
         do {
-            let newest = try client.timeline(roomId: roomId, limit: Self.page, before: nil)
+            // Re-read the whole loaded range, not just the newest page, so every
+            // row on screen picks up its current state (decrypted / failed /
+            // confirmed). Mirrors Android's ChatViewModel.refresh.
+            let window = max(Self.page, UInt32(state.events.count))
+            let newest = try client.timeline(roomId: roomId, limit: window, before: nil)
             state.loading = false
-            state.events = merge(state.events, newest)
+            state.events = mergeTimeline(existing: state.events, fresh: newest)
         } catch {
             state.loading = false
             state.error = chatErrorMessage(error)
@@ -61,7 +65,7 @@ final class ChatViewModel: ObservableObject {
         do {
             let older = try client.timeline(roomId: roomId, limit: Self.page, before: oldest.cursor)
             if older.isEmpty { state.atTop = true }
-            else { state.events = merge(older, state.events) }
+            else { state.events = mergeTimeline(existing: state.events, fresh: older) }
         } catch {
             state.error = chatErrorMessage(error)
         }
@@ -116,12 +120,18 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Union two pages by event id and order by the opaque cursor (DAG depth).
-    private func merge(_ a: [TimelineEvent], _ b: [TimelineEvent]) -> [TimelineEvent] {
-        var seen = Set<String>()
-        return (a + b)
-            .filter { seen.insert($0.eventId).inserted }
-            .sorted { $0.cursor < $1.cursor }
-    }
+}
+
+/// Merge a freshly-read page into what's on screen, by event id, ordered by
+/// cursor. **The fresh copy wins**: an event's rendering changes after it first
+/// loads — pending decryption (hidden) → decrypted or "unable to decrypt",
+/// sending → confirmed — and keeping the stale copy left those rows hidden, e.g.
+/// every message after a key restore. Mirrors Android's `mergeTimeline`.
+func mergeTimeline(existing: [TimelineEvent], fresh: [TimelineEvent]) -> [TimelineEvent] {
+    var seen = Set<String>()
+    return (fresh + existing)
+        .filter { seen.insert($0.eventId).inserted }
+        .sorted { $0.cursor < $1.cursor }
 }
 
 /// The user-facing message for a failed chat action (send / invite / attach /

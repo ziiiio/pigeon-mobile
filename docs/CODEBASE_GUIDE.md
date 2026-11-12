@@ -514,6 +514,13 @@ UI rules both platforms must follow (each was once broken on one of them):
   decryption. Render **nothing** for those (Android's `TimelineRow` ends `else -> Unit`).
   iOS once drew every non-system event as a `MessageBubble`, so each new room opened with two
   empty "messages".
+- **A row's rendering changes after it loads — the fresh copy must win.** An encrypted message
+  first arrives *pending* (hidden), then becomes decrypted or "⚠ Unable to decrypt"; an echo
+  goes sending → confirmed. `mergeTimeline(existing, fresh)` (both platforms) keeps the
+  **fresh** copy per event id, and `refresh()` re-reads the whole loaded range, not just the
+  newest page. It used to keep the first copy, so rows loaded while pending stayed hidden for
+  the life of the view-model — on Android that's cached per room, so every message after a key
+  restore stayed invisible even across re-opening the room.
 - **A chat error belongs to the last action, not the screen.** `ChatViewModel.clearError()`
   runs at the start of every send/invite/attach and when the user dismisses it (the ✕ on
   Android's error-coloured `Snackbar` — `errorContainer` colours, in the `Scaffold`'s

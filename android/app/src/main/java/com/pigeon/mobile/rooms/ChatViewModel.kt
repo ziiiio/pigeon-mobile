@@ -61,8 +61,12 @@ class ChatViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.value = try {
-                val newest = withContext(Dispatchers.IO) { client.timeline(roomId, PAGE, null) }
-                _state.value.copy(loading = false, events = merge(_state.value.events, newest))
+                // Re-read the whole loaded range, not just the newest page, so every
+                // row on screen picks up its current state (decrypted / failed /
+                // confirmed) — not only the most recent PAGE.
+                val window = maxOf(PAGE, _state.value.events.size.toUInt())
+                val fresh = withContext(Dispatchers.IO) { client.timeline(roomId, window, null) }
+                _state.value.copy(loading = false, events = mergeTimeline(_state.value.events, fresh))
             } catch (e: CoreException) {
                 _state.value.copy(loading = false, error = chatErrorMessage(e))
             }
@@ -90,7 +94,7 @@ class ChatViewModel(
                 if (older.isEmpty()) {
                     _state.value.copy(atTop = true)
                 } else {
-                    _state.value.copy(events = merge(older, _state.value.events))
+                    _state.value.copy(events = mergeTimeline(_state.value.events, older))
                 }
             } catch (e: CoreException) {
                 _state.value.copy(error = chatErrorMessage(e))
@@ -169,9 +173,17 @@ class ChatViewModel(
         }
 
     /** Union two pages by event id and order by the opaque cursor (DAG depth). */
-    private fun merge(a: List<TimelineEvent>, b: List<TimelineEvent>): List<TimelineEvent> =
-        (a + b).distinctBy { it.eventId }.sortedBy { it.cursor }
 }
+
+/**
+ * Merge a freshly-read page into what's on screen, by event id, ordered by
+ * cursor. **The fresh copy wins**: an event's rendering changes after it first
+ * loads — pending decryption (hidden) → decrypted or "unable to decrypt", sending
+ * → confirmed — and keeping the stale copy left those rows hidden for as long as
+ * the (cached, per-room) view-model lived, e.g. every message after a key restore.
+ */
+internal fun mergeTimeline(existing: List<TimelineEvent>, fresh: List<TimelineEvent>): List<TimelineEvent> =
+    (fresh + existing).distinctBy { it.eventId }.sortedBy { it.cursor }
 
 /**
  * The user-facing message for a failed chat action (send / invite / attach /

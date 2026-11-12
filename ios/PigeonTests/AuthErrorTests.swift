@@ -87,3 +87,34 @@ final class AuthErrorTests: XCTestCase {
         XCTAssertEqual(chatErrorMessage(e), authErrorMessage(e))
     }
 }
+
+// mergeTimeline — the chat timeline merge (mirrors Android's TimelineMergeTest).
+// Lives in this file because the test target lists its sources explicitly.
+final class TimelineMergeTests: XCTestCase {
+
+    private func ev(_ id: String, _ cursor: Int64, body: String? = nil, system: String? = nil) -> TimelineEvent {
+        TimelineEvent(eventId: id, sender: "@a:s", originServerTs: cursor, cursor: cursor,
+                      body: body, systemText: system, pending: false, failed: false, image: nil)
+    }
+
+    func testFreshCopyReplacesTheStaleOne() {
+        // Loaded while pending decryption (hidden), then decrypted after a restore.
+        let merged = mergeTimeline(existing: [ev("$a", 1, body: "hi"), ev("$enc", 2)],
+                                   fresh: [ev("$enc", 2, body: "the secret")])
+        XCTAssertEqual(merged.map(\.eventId), ["$a", "$enc"])
+        XCTAssertEqual(merged[1].body, "the secret")
+    }
+
+    func testFailedDecryptReplacesTheHiddenPendingCopy() {
+        let merged = mergeTimeline(existing: [ev("$enc", 2)],
+                                   fresh: [ev("$enc", 2, system: "⚠ Unable to decrypt")])
+        XCTAssertEqual(merged.first?.systemText, "⚠ Unable to decrypt")
+    }
+
+    func testOlderPagesMergeInCursorOrderWithoutDuplicates() {
+        let merged = mergeTimeline(existing: [ev("$c", 3), ev("$d", 4)],
+                                   fresh: [ev("$a", 1), ev("$b", 2), ev("$c", 3)])
+        XCTAssertEqual(merged.map(\.eventId), ["$a", "$b", "$c", "$d"])
+    }
+}
+
