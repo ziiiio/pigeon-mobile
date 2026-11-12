@@ -126,6 +126,13 @@ The app opens on the **auth screen** ("Sign in to Pigeon"). The default homeserv
 `http://10.0.2.2:8008` — inside the emulator, **`10.0.2.2` is the host machine's
 loopback**, so that's how the app reaches a homeserver you're running on your laptop.
 
+That alias is an **Android-emulator-only** trick: the emulator runs the phone on its own
+virtual `10.0.2.0/24` network and its virtual router answers `10.0.2.2`. The **iOS
+simulator** has no such network — it shares the Mac's own network stack, so there the same
+server is plain `http://localhost:8008`, and `10.0.2.2` is just an ordinary LAN address that
+times out. The iOS `AuthView` therefore pre-fills `http://localhost:8008` on the simulator
+(`#if targetEnvironment(simulator)`) and a blank `https://` on a real device.
+
 ### The end-to-end test (needs Docker)
 
 The `e2e/` crate drives the core against a *real* homeserver (spun in-process with a real

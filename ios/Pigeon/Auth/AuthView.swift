@@ -9,7 +9,21 @@ struct AuthView: View {
     let onLogin: (String, String, String) -> Void
     let onRegister: (String, String, String) -> Void
 
-    @State private var server = "https://"
+    @State private var server = AuthView.defaultServer
+
+    /// The pre-filled homeserver URL. On the **simulator** that's the Mac's
+    /// loopback — the simulator shares the host's network stack, so a dev server
+    /// on the Mac is `http://localhost:8008`. (Android's emulator pre-fills
+    /// `10.0.2.2`, its NAT alias for the host; that address means nothing here —
+    /// on the Mac it routes to the LAN gateway and times out.) On a real device
+    /// `localhost` is the phone itself, so it gets the blank `https://` prompt.
+    static var defaultServer: String {
+        #if targetEnvironment(simulator)
+        return "http://localhost:8008"
+        #else
+        return "https://"
+        #endif
+    }
     @State private var username = ""
     @State private var password = ""
 
