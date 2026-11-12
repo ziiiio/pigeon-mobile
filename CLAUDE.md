@@ -287,6 +287,8 @@ This project keeps **three** docs, each with one job. A change that lands code a
 - [`ROADMAP.md`](ROADMAP.md) — the plan: phases, stage breakdowns, success criteria. Update when scope, ordering, or a stage's status changes.
 - `CLAUDE.md` (this file) — the rulebook: conventions, gotchas, decisions, the current-phase guard. Update when a convention/gotcha/decision changes or the active phase moves.
 
+**Cross-repo runbook.** The hands-on guide to running these apps against a local homeserver — simulator/emulator setup, testing a conversation, wiping app data, backup/restore — lives in the server repo at [`../pigeon/docs/LOCAL_TESTING.md`](../pigeon/docs/LOCAL_TESTING.md), and it walks through this app's screens by name. When a change here alters what it describes — a **menu label**, a **pre-filled homeserver URL**, the join/invite/backup/restore **flow**, the bundle/package ids, or the iOS/Android build scripts — update that file too (it's a separate commit, in the other repo).
+
 ## References
 
 - [`../pigeon`](../pigeon) — the homeserver. Its `CLAUDE.md`, `docs/ARCHITECTURE.md`, and `docs/CODEBASE_GUIDE.md` define the protocol and the crates this client reuses. **The authoritative protocol source.**
