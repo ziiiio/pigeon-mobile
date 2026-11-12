@@ -40,6 +40,7 @@
     <string name="restore_confirm">Restore</string>
 
     <!-- Chat (M2.4) -->
+    <string name="rooms_id_copied">Room id copied</string>
     <string name="chat_back">Back</string>
     <string name="chat_empty">No messages yet</string>
 

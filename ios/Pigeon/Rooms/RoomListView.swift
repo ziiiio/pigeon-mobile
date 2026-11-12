@@ -103,22 +103,36 @@ struct RoomListView: View {
             NavigationLink {
                 ChatView(client: client, room: room, myUserId: session.userId, timeline: timeline)
             } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(room.name ?? room.roomId).font(.body)
-                        if room.name != nil {
-                            Text(room.roomId).font(.caption2).foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    Spacer()
-                    if room.encrypted {
-                        Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
-                    }
+                roomLabel(room)
+            }
+            // Long-press → copy the room id. Joining is by room id (invites don't
+            // surface in the list), and ids mix look-alike characters (I/l), so
+            // sharing must not mean retyping. Mirrors Android's long-press copy.
+            .contextMenu {
+                Button {
+                    UIPasteboard.general.string = room.roomId
+                } label: {
+                    Label("Copy room id", systemImage: "doc.on.doc")
                 }
             }
         }
         .listStyle(.plain)
+    }
+
+    private func roomLabel(_ room: Room) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(room.name ?? room.roomId).font(.body)
+                if room.name != nil {
+                    Text(room.roomId).font(.caption2).foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            if room.encrypted {
+                Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var emptyState: some View {

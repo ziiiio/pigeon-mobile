@@ -23,6 +23,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.platform.LocalContext
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.Toast
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -323,12 +329,25 @@ private fun RestoreBackupDialog(onDismiss: () -> Unit, onRestore: (String) -> Un
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RoomRow(room: Room, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val copiedMsg = stringResource(R.string.rooms_id_copied)
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            // Tap opens the room; long-press copies its id. Joining is by room id
+            // (invites don't surface in the list), so the id must be shareable
+            // without retyping — ids mix look-alike characters (I/l).
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    context.getSystemService(ClipboardManager::class.java)
+                        ?.setPrimaryClip(ClipData.newPlainText("Room id", room.roomId))
+                    Toast.makeText(context, copiedMsg, Toast.LENGTH_SHORT).show()
+                },
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -352,6 +371,16 @@ private fun RoomRow(room: Room, onClick: () -> Unit) {
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        // The room id, as iOS shows it — what an invitee needs to join.
+        if (room.name != null) {
+            Text(
+                text = room.roomId,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

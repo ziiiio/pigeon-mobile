@@ -522,6 +522,10 @@ UI rules both platforms must follow (each was once broken on one of them):
   `authErrorMessage` but rewords the codes whose sign-in wording misleads in a chat — a
   malformed invitee id (`InvalidUsername`) and a refused action (`Forbidden`). Android used to
   show the raw `e.message` (`code=uniffi…ErrorCode$InvalidUsername@…`).
+- **Room ids must be copyable.** Joining is by room id (the server has no invite list), and
+  ids mix look-alike characters (`I`/`l`), so retyping one is error-prone. Both room lists
+  show the id under the room name, and a **long-press copies it** (Android toast / iOS
+  context menu).
 
 **iOS (M5)** mirrors all of this in SwiftUI under `ios/Pigeon/` over the *same*
 core — see `ARCHITECTURE.md` §6.
