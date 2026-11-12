@@ -85,9 +85,14 @@ struct ChatView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 2)
-        } else {
+        } else if event.body != nil || event.image != nil {
             MessageBubble(event: event, isMine: event.sender == myUserId, loadImage: vm.downloadImage)
         }
+        // Otherwise render nothing, like Android's `else -> Unit`: the core hands
+        // back events with no body, image or system line on purpose — state it
+        // doesn't describe (`power_levels`/`join_rules`, emitted by every
+        // createRoom) and encrypted messages still pending decryption. Drawing
+        // them as bubbles showed two empty "messages" in every new room.
     }
 
     private var composer: some View {

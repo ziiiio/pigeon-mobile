@@ -508,6 +508,12 @@ parsing, no crypto, no request bodies — every bubble is a core-rendered `Timel
 
 UI rules both platforms must follow (each was once broken on one of them):
 
+- **Not every `TimelineEvent` is a row.** The core deliberately returns events with no
+  `body`, no `image` and no `system_text` — state it doesn't describe (`power_levels` and
+  `join_rules`, which every `createRoom` emits) and encrypted messages still pending
+  decryption. Render **nothing** for those (Android's `TimelineRow` ends `else -> Unit`).
+  iOS once drew every non-system event as a `MessageBubble`, so each new room opened with two
+  empty "messages".
 - **A chat error belongs to the last action, not the screen.** `ChatViewModel.clearError()`
   runs at the start of every send/invite/attach and when the user dismisses it (tap on
   Android, the alert's OK on iOS). Before that, a failed invite's message never went away on
