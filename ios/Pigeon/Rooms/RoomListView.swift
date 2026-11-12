@@ -5,6 +5,7 @@
 // (Gotcha #6 — the iOS side even folds in `scenePhase`, which Android handles
 // separately). The observer bridges the core's change-stream to the view-model.
 import SwiftUI
+import UniformTypeIdentifiers
 import PigeonCore
 
 struct RoomListView: View {
@@ -60,12 +61,11 @@ struct RoomListView: View {
             TextEntrySheet(title: "Restore keys", field: "Recovery key",
                            confirm: "Restore") { vm.restoreBackup($0) }
         }
-        .alert("Save your recovery key",
-               isPresented: Binding(get: { vm.state.recoveryKey != nil },
+        // A sheet, not an alert: alert text can't be selected or copied, and the
+        // user must be able to save this key (it's shown once).
+        .sheet(isPresented: Binding(get: { vm.state.recoveryKey != nil },
                                     set: { if !$0 { vm.clearRecoveryKey() } })) {
-            Button("Done") { vm.clearRecoveryKey() }
-        } message: {
-            Text(recoveryMessage)
+            RecoveryKeySheet(recoveryKey: vm.state.recoveryKey ?? "") { vm.clearRecoveryKey() }
         }
         .alert("Error",
                isPresented: Binding(get: { vm.state.actionError != nil },
@@ -164,12 +164,6 @@ struct RoomListView: View {
         }
     }
 
-    private var recoveryMessage: String {
-        let key = vm.state.recoveryKey ?? ""
-        return "This is the only secret that can restore your encrypted messages on a "
-            + "new device. Save it somewhere safe — it never leaves your device.\n\n\(key)"
-    }
-
     /// Start the core sync loop, bridging its signals into the VM + timeline tick.
     private func startSync() async {
         let observer = RoomSyncObserver(
@@ -241,4 +235,53 @@ private struct TextEntrySheet: View {
             }
         }
     }
+}
+
+/// Shows the just-created recovery key once (M4.3), with a **Copy** button and
+/// selectable monospaced text (look-alike characters stay distinguishable if the
+/// user writes it down). Swipe-to-dismiss is disabled so the key can't be lost
+/// to a stray gesture — only Done closes it. Mirrors Android's `RecoveryKeyDialog`.
+private struct RecoveryKeySheet: View {
+    let recoveryKey: String
+    let onDone: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section {
+                    Text(recoveryKey)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button {
+                        copyRecoveryKey(recoveryKey)
+                        copied = true
+                    } label: {
+                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                } footer: {
+                    Text("This is the only secret that can restore your encrypted messages on "
+                         + "a new device. Save it somewhere safe — it is never sent to the server "
+                         + "and won't be shown again.")
+                }
+            }
+            .navigationTitle("Save your recovery key")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done", action: onDone) }
+            }
+        }
+        .interactiveDismissDisabled()
+    }
+}
+
+/// Copy the recovery key to the pasteboard **local-only** (never synced to the
+/// user's other Apple devices via Universal Clipboard) and **expiring** after 10
+/// minutes, so the secret doesn't sit on the clipboard indefinitely. Only ever on
+/// an explicit tap — nothing reaches the server (Gotcha #1).
+private func copyRecoveryKey(_ key: String) {
+    UIPasteboard.general.setItems(
+        [[UTType.utf8PlainText.identifier: key]],
+        options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(600)]
+    )
 }

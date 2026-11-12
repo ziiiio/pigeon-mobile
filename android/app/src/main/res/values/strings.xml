@@ -35,6 +35,8 @@
     <string name="backup_title">Recovery key</string>
     <string name="backup_message">Save this recovery key somewhere safe. It is the only way to restore your encrypted messages on a new device, and it is never sent to the server. It will not be shown again.</string>
     <string name="backup_done">Done</string>
+    <string name="backup_copy">Copy</string>
+    <string name="backup_copied">Recovery key copied</string>
     <string name="restore_title">Restore from backup</string>
     <string name="restore_key_hint">Recovery key</string>
     <string name="restore_confirm">Restore</string>

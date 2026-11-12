@@ -527,6 +527,14 @@ UI rules both platforms must follow (each was once broken on one of them):
   ids mix look-alike characters (`I`/`l`), so retyping one is error-prone. Both room lists
   show the id under the room name, and a **long-press copies it** (Android toast / iOS
   context menu).
+- **A secret the user must save gets a Copy button, not just text.** The backup recovery key
+  is shown once. Text in an Android `AlertDialog` is barely selectable (the dialog is its own
+  window, so the selection toolbar often never appears) and iOS alert text can't be selected
+  at all — so both show the key in monospace with an explicit **Copy** (iOS moved it from an
+  alert into a sheet with swipe-to-dismiss disabled). The copy is hardened per platform:
+  Android flags the clip `EXTRA_IS_SENSITIVE` (hidden from the clipboard preview and keyboard
+  suggestions on 13+); iOS writes it `localOnly` (no Universal Clipboard) with a 10-minute
+  expiry.
 
 **iOS (M5)** mirrors all of this in SwiftUI under `ios/Pigeon/` over the *same*
 core — see `ARCHITECTURE.md` §6.

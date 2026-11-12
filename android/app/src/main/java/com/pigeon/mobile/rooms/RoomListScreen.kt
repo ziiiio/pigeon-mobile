@@ -29,6 +29,10 @@ import androidx.compose.ui.platform.LocalContext
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.widget.Toast
+import android.content.Context
+import android.os.Build
+import android.os.PersistableBundle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -280,6 +284,8 @@ fun RoomListScreen(
 
 @Composable
 private fun RecoveryKeyDialog(recoveryKey: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val copiedMsg = stringResource(R.string.backup_copied)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.backup_title)) },
@@ -289,7 +295,9 @@ private fun RecoveryKeyDialog(recoveryKey: String, onDismiss: () -> Unit) {
                 SelectionContainer {
                     Text(
                         text = recoveryKey,
-                        style = MaterialTheme.typography.bodyMedium,
+                        // Monospace so look-alike characters (I/l/1, O/0) stay
+                        // distinguishable if the user writes the key down.
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -301,7 +309,36 @@ private fun RecoveryKeyDialog(recoveryKey: String, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.backup_done)) }
         },
+        // Selecting text inside a dialog is unreliable (it's its own window, so
+        // the selection toolbar often never appears) — an explicit Copy is the
+        // dependable path.
+        dismissButton = {
+            TextButton(onClick = {
+                copySecret(context, recoveryKey)
+                // Android 13+ shows its own copy confirmation; avoid a double.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    Toast.makeText(context, copiedMsg, Toast.LENGTH_SHORT).show()
+                }
+            }) { Text(stringResource(R.string.backup_copy)) }
+        },
     )
+}
+
+/**
+ * Put a secret (the recovery key) on the clipboard, flagged **sensitive** so
+ * Android 13+ hides it from the clipboard preview overlay and the keyboard's
+ * clipboard suggestions. Older releases ignore the extra (no harm). Only ever on
+ * an explicit user tap — the key is the user's to save (Gotcha #1 still holds:
+ * nothing reaches the server).
+ */
+private fun copySecret(context: Context, secret: String) {
+    val clip = ClipData.newPlainText("Recovery key", secret).apply {
+        description.extras = PersistableBundle().apply {
+            // ClipDescription.EXTRA_IS_SENSITIVE (API 33); the literal keeps minSdk 24 compiling.
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+        }
+    }
+    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
 }
 
 @Composable
