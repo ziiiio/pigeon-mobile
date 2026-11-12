@@ -1,0 +1,78 @@
+# cargo-deny policy for the shared Rust core (pigeon-mobile-core).
+#
+# Mirrors the homeserver repo's ../pigeon/deny.toml so the client and server
+# are held to one dependency standard: RUSTSEC advisories, a permissive-license
+# allowlist (catches copyleft / surprise licenses entering the tree — the "no
+# surprise deps" rule), and source restrictions. Run by the `deny` CI job;
+# locally: `cargo deny check` from core/.
+#
+# Every ignored advisory carries a justification. Most come from the shared
+# client-crypto stack (pigeon-crypto -> openmls_rust_crypto 0.5.1), so they
+# match the server repo's entries; its docs/SECURITY_REVIEW.md is the register
+# with the full reasoning. Re-check these whenever that stack is bumped.
+
+[advisories]
+version = 2
+# Only flag unmaintained crates we depend on directly; transitive unmaintained
+# crates are tracked upstream.
+unmaintained = "workspace"
+ignore = [
+    # libcrux-sha3 0.0.8 / libcrux-secrets 0.0.5. Pulled by pigeon-crypto ->
+    # openmls_rust_crypto 0.5.1 -> hpke-rs 0.6.1, which pins the exact 0.0.x
+    # versions. Unreachable: hpke-rs uses libcrux only for the post-quantum
+    # X-Wing / ML-KEM KEMs; Pigeon's sole ciphersuite is
+    # MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519. Fix = openmls_rust_crypto
+    # 0.6 / hpke-rs 0.7 (breaking MLS-stack bump, shared with ../pigeon) — tracked.
+    { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 incremental SHAKE: only used for PQ KEMs; Pigeon uses DHKEM X25519 (tracked: openmls_rust_crypto 0.6)" },
+    { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 SHAKE-256 panic: only used for PQ KEMs; Pigeon uses DHKEM X25519 (tracked: openmls_rust_crypto 0.6)" },
+    { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets aarch64 ct select: reached only via libcrux-sha3, i.e. PQ KEMs Pigeon doesn't use (tracked: openmls_rust_crypto 0.6)" },
+    # crypto-bigint 0.5.5 timing variability. Pulled only via the NIST/secp
+    # curves (p256, p384, k256) that hpke-rs / openmls_rust_crypto carry for
+    # P-256/P-384 ciphersuites and ECDSA. Unreachable: the X25519 + Ed25519
+    # suite runs on the curve25519 crates. Same tracked bump as above.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint via p256/p384/k256: only P-256/P-384/ECDSA paths; Pigeon uses X25519+Ed25519 (tracked: openmls_rust_crypto 0.6)" },
+    # SQLite < 3.54 (bundled by libsqlite3-sys 0.28 via rusqlite 0.31) can
+    # return uninitialised page-cache memory when it opens a database together
+    # with a sibling -wal file of a different page size (reviewed 2026-11-13).
+    # Unreachable on device: the attack needs a crafted db + -wal pair written by
+    # a less-trusted party, and the core only ever opens its OWN store in
+    # OS-sandboxed app-private storage (Android filesDir / iOS Application
+    # Support), which other apps can't write without a sandbox escape.
+    # Why not upgrade: the fix is libsqlite3-sys 0.39 (rusqlite 0.41), but the
+    # e2e crate links this core AND the homeserver (in-process, via
+    # tests-integration) into one binary, and Cargo allows one `links = "sqlite3"`
+    # package per graph — counting sqlx's *unused, optional* SQLite backend, whose
+    # libsqlite3-sys range stops below 0.38 even in sqlx 0.9.0. Tracked: lift by
+    # running e2e's server out-of-process (no shared link graph), or when sqlx
+    # accepts libsqlite3-sys >= 0.39.
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite WAL page-size bug: needs attacker-written db+wal; the core opens only its own sandboxed store (tracked: e2e out-of-process server, or sqlx accepting libsqlite3-sys >= 0.39)" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+# Same allowlist as the server; not every entry occurs in this tree.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -193,7 +193,7 @@ Stick to these unless you have a specific reason and have discussed it.
 - **FFI**: **UniFFI** (Mozilla) — generates Kotlin & Swift bindings. No hand-written JNI.
 - **HTTP**: `reqwest` with `rustls` (matches the server's client choice).
 - **Crypto**: reuse `pigeon-crypto` (MLS via `openmls`, `openmls_rust_crypto` provider). **Do not add a second crypto path.** Do not roll your own crypto. New crypto deps need flagging *and* must already be approved server-side.
-- **Local store**: SQLite via **`rusqlite` (`bundled`)** — decided & flagged in M2.1 (over `sqlx`: lighter, statically links SQLite for a clean `cargo-ndk` cross-compile, no build-time DB). Secrets/keys go in the platform keystore, *referenced* from the core, not stored in the app DB in clear.
+- **Local store**: SQLite via **`rusqlite` (`bundled`)** (held at 0.31: newer `rusqlite` bundles a `libsqlite3-sys` that can't share a link graph with the homeserver's `sqlx` in `e2e/` — Cargo allows one `links = "sqlite3"` package, counting `sqlx`'s *optional* SQLite backend; RUSTSEC-2026-0459 is accepted in `core/deny.toml` for that reason) — decided & flagged in M2.1 (over `sqlx`: lighter, statically links SQLite for a clean `cargo-ndk` cross-compile, no build-time DB). Secrets/keys go in the platform keystore, *referenced* from the core, not stored in the app DB in clear.
 - **Async**: `tokio`. UniFFI async functions are supported; prefer them over callback soup.
 - **Serialization**: `serde` / `serde_json`. Canonical JSON for anything signed → `pigeon-core::canonical` (Gotcha #4).
 - **Errors**: `thiserror` in the core; surfaced as UniFFI error enums.

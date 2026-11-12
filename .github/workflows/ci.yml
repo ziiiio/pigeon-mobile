@@ -63,6 +63,30 @@ jobs:
             --language swift --out-dir target/bindings/swift
           test -f target/bindings/swift/pigeon_mobile_core.swift
 
+  # Supply-chain lane: cargo-deny over the shared Rust core — RUSTSEC advisories,
+  # a permissive-license allowlist, and source restrictions, from core/deny.toml
+  # (mirrors ../pigeon's policy). Fails the build on a *new* advisory, so a
+  # vulnerable crate in what ships inside both apps can't slip in unnoticed.
+  # Needs the sibling pigeon checkout only so cargo can resolve the path-deps;
+  # the action bundles cargo-deny, so no toolchain/build is needed. cargo-deny
+  # picks up core/deny.toml from beside the manifest.
+  deny:
+    name: cargo-deny (supply chain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pigeon-mobile
+      - uses: actions/checkout@v4
+        with:
+          repository: ziiiio/pigeon
+          path: pigeon
+          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: pigeon-mobile/core/Cargo.toml
+          command: check
+
   # Android lane: cross-compile the core (cargo-ndk) and assemble the app. The
   # ubuntu runner is amd64, so the NDK's x86_64 toolchain runs natively (no
   # emulation needed, unlike the Apple-Silicon dev container).
