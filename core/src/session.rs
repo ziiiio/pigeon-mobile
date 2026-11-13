@@ -185,26 +185,52 @@ impl PigeonClient {
 
     /// Back up this device's encryption keys (M4.3): create an encrypted backup of
     /// the MLS state and store the opaque blob on the server, returning the
-    /// **recovery key** for the user to save. The recovery key is the only secret
-    /// that can restore the backup and **never leaves the device via the server**
-    /// (the server stores only ciphertext — Gotcha #1). Show it once; if lost, the
-    /// backup is unrecoverable. Errors if E2EE isn't set up for this session.
-    pub async fn backup(&self) -> Result<String, CoreError> {
+    /// **recovery key** for the user to save plus the time the backup was taken.
+    /// The recovery key is the only secret that can restore the backup and
+    /// **never leaves the device via the server** (the server stores only
+    /// ciphertext — Gotcha #1). Show it once; if lost, the backup is
+    /// unrecoverable. A new backup **replaces** the previous one, so an older
+    /// recovery key stops working. Errors if E2EE isn't set up for this session.
+    ///
+    /// The backup is a snapshot: it can restore messages from `created_at_ms`
+    /// onward, never ones this device had already read (MLS forward secrecy —
+    /// see `design/history-backup.md` in `../pigeon`). The UI says so.
+    pub async fn backup(&self) -> Result<KeyBackup, CoreError> {
         let (recovery_key, blob) = self.e2ee()?.create_backup()?;
+        let created_at_ms = now_ms();
         self.api
-            .put_room_key(BACKUP_ROOM, BACKUP_SESSION, &blob)
+            .put_room_key(BACKUP_ROOM, BACKUP_SESSION, &blob, created_at_ms)
             .await?;
-        Ok(recovery_key)
+        Ok(KeyBackup {
+            recovery_key,
+            created_at_ms,
+        })
+    }
+
+    /// Whether this account has a key backup on the server, and when it was
+    /// taken (M4.3) — so the UI can show "last backup: …" before the user backs
+    /// up again or restores. `None` = no backup yet. No secret is involved: the
+    /// blob is fetched but not decrypted.
+    pub async fn backup_status(&self) -> Result<Option<BackupStatus>, CoreError> {
+        Ok(self
+            .api
+            .get_room_key(BACKUP_ROOM, BACKUP_SESSION)
+            .await?
+            .map(|stored| BackupStatus {
+                backed_up_at_ms: stored.created_at_ms,
+            }))
     }
 
     /// Restore this device's encryption keys from the server-side backup (M4.3)
     /// using the user's `recovery_key`. Fetches the encrypted blob, decrypts it,
     /// **replaces** this session's freshly-minted identity with the recovered one,
-    /// and re-publishes its keys so peers can reach it. Errors if there's no backup
-    /// on the server (`CoreError::Api { code: NotFound }`) or the recovery key is
-    /// wrong (`CoreError::Crypto` — AEAD decryption fails cleanly).
-    pub async fn restore_backup(&self, recovery_key: String) -> Result<(), CoreError> {
-        let blob = self
+    /// and re-publishes its keys so peers can reach it. Returns when the restored
+    /// backup was taken — messages from before then stay undecryptable, and the
+    /// UI tells the user. Errors if there's no backup on the server
+    /// (`CoreError::Api { code: NotFound }`) or the recovery key is wrong
+    /// (`CoreError::Crypto` — AEAD decryption fails cleanly).
+    pub async fn restore_backup(&self, recovery_key: String) -> Result<BackupStatus, CoreError> {
+        let stored = self
             .api
             .get_room_key(BACKUP_ROOM, BACKUP_SESSION)
             .await?
@@ -215,12 +241,40 @@ impl PigeonClient {
                 code: ErrorCode::NotFound,
                 reason: "no encryption-key backup found on the server".to_owned(),
             })?;
-        self.e2ee()?.restore_from_backup(&recovery_key, &blob)?;
+        self.e2ee()?
+            .restore_from_backup(&recovery_key, &stored.blob)?;
         // The recovered identity differs from the fresh login one — re-publish so
         // peers can claim its KeyPackages for new invites.
         self.publish_device_keys().await;
-        Ok(())
+        Ok(BackupStatus {
+            backed_up_at_ms: stored.created_at_ms,
+        })
     }
+}
+
+/// A freshly made key backup (M4.3): the recovery key to show the user once,
+/// and when the backup was taken (Unix ms) — the point from which it can
+/// restore messages.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct KeyBackup {
+    pub recovery_key: String,
+    pub created_at_ms: i64,
+}
+
+/// What the UI may know about the account's server-side key backup (M4.3).
+/// `backed_up_at_ms` is `None` when the backup was written without a timestamp
+/// (the reference CLI, or an app build from before it was recorded).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BackupStatus {
+    pub backed_up_at_ms: Option<i64>,
+}
+
+/// Wall-clock now in Unix milliseconds (0 if the clock is before 1970).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 // --- The host key store (M1.3) ----------------------------------------------

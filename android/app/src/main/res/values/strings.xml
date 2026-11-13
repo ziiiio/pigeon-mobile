@@ -37,6 +37,8 @@
     <string name="backup_in_progress">Backing up encryption keys…</string>
     <string name="restore_in_progress">Restoring encryption keys…</string>
     <string name="backup_done">Done</string>
+    <string name="backup_info_title">Back up encryption keys</string>
+    <string name="backup_confirm">Back up now</string>
     <string name="backup_copy">Copy</string>
     <string name="backup_copied">Recovery key copied</string>
     <string name="restore_title">Restore from backup</string>

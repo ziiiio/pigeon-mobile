@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use pigeon_mobile_core::api::{Api, ErrorCode};
 use pigeon_mobile_core::e2ee::E2ee;
-use pigeon_mobile_core::session;
+use pigeon_mobile_core::session::{self, BackupStatus};
 use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
 use serde_json::json;
@@ -765,8 +765,16 @@ async fn backup_puts_blob_and_returns_recovery_key() {
         .mount(&server)
         .await;
 
-    let recovery_key = client.backup().await.expect("backup ok");
-    assert!(!recovery_key.is_empty(), "a recovery key is returned");
+    let before = now_ms();
+    let backup = client.backup().await.expect("backup ok");
+    assert!(
+        !backup.recovery_key.is_empty(),
+        "a recovery key is returned"
+    );
+    assert!(
+        (before..=now_ms()).contains(&backup.created_at_ms),
+        "the backup reports when it was taken"
+    );
 
     // The stored body carries a base64 blob, never anything plaintext-identifying.
     let requests = server.received_requests().await.expect("recorded requests");
@@ -776,6 +784,16 @@ async fn backup_puts_blob_and_returns_recovery_key() {
         .expect("a backup PUT was made");
     let body: serde_json::Value = serde_json::from_slice(&put.body).unwrap();
     assert!(body["blob"].as_str().is_some(), "stores a base64 blob");
+    // The time is stored beside the blob so a restoring device can tell the user
+    // which messages the backup can't bring back.
+    assert_eq!(body["created_at_ms"].as_i64(), Some(backup.created_at_ms));
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 #[tokio::test]
@@ -793,17 +811,87 @@ async fn restore_backup_fetches_blob_and_recovers_identity() {
             "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
         ))
         .and(header("authorization", "Bearer secret-token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "blob": blob })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "blob": blob, "created_at_ms": 1_763_000_000_000_i64 })),
+        )
         .expect(1)
         .mount(&server)
         .await;
 
     // Restoring swaps in the recovered identity + groups (key re-publish is
-    // best-effort — /keys/upload 404s here, which is fine).
-    client
+    // best-effort — /keys/upload 404s here, which is fine), and reports when the
+    // backup was taken so the UI can say what it can't bring back.
+    let restored = client
         .restore_backup(recovery_key)
         .await
         .expect("restore ok");
+    assert_eq!(restored.backed_up_at_ms, Some(1_763_000_000_000));
+}
+
+#[tokio::test]
+async fn restore_accepts_a_backup_without_a_timestamp() {
+    // The reference CLI (and app builds before the stamp) store only `{ blob }`.
+    let donor = E2ee::create("@alice:test.example").expect("donor device");
+    let (recovery_key, blob) = donor.create_backup().expect("backup");
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "blob": blob })))
+        .mount(&server)
+        .await;
+
+    let restored = client
+        .restore_backup(recovery_key)
+        .await
+        .expect("restore ok");
+    assert_eq!(restored.backed_up_at_ms, None, "unknown time, not an error");
+}
+
+#[tokio::test]
+async fn backup_status_reports_presence_and_time() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
+        ))
+        .and(header("authorization", "Bearer secret-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({ "blob": "b3BhcXVl", "created_at_ms": 1_763_000_000_000_i64 }),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client.backup_status().await.expect("status ok"),
+        Some(BackupStatus {
+            backed_up_at_ms: Some(1_763_000_000_000)
+        })
+    );
+}
+
+#[tokio::test]
+async fn backup_status_is_none_without_a_backup() {
+    let server = MockServer::start().await;
+    let client = logged_in(&server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_pigeon/client/v1/room_keys/key/!e2ee-backup/mls-device-state",
+        ))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(
+                json!({ "errcode": "P_NOT_FOUND", "error": "no such backed-up key" }),
+            ),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(client.backup_status().await.expect("status ok"), None);
 }
 
 #[tokio::test]

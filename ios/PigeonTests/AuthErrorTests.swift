@@ -163,8 +163,40 @@ final class BackupFeedbackTests: XCTestCase {
                        "Restore failed — that recovery key doesn't match your backup. Check it and try again.")
         XCTAssertEqual(backupErrorMessage(CoreError.Network(reason: "x")),
                        "Backup failed — couldn't reach the server. Check your connection and try again.")
-        XCTAssertEqual(restoreOK,
-                       "Encryption keys restored. New messages in your encrypted rooms will decrypt on this device.")
+        let fmt: (Int64) -> String = { "T\($0)" }
+        XCTAssertEqual(restoreSuccessMessage(42, format: fmt),
+                       "Encryption keys restored from your backup of T42. New messages will decrypt; "
+                       + "messages from before the backup can't be recovered.")
+        XCTAssertEqual(backupCoverageText(7, format: fmt),
+                       "This backup covers messages from T7 onward. Messages from before then can't be restored with it.")
+    }
+
+    private let fmt: (Int64) -> String = { "T\($0)" }
+
+    func testRestoreSuccessSaysWhatCameBackAndWhatCannot() {
+        let dated = restoreSuccessMessage(42, format: fmt)
+        XCTAssertTrue(dated.contains("backup of T42"), dated)
+        XCTAssertTrue(dated.contains("can't be recovered"), dated)
+        XCTAssertFalse(dated.contains("all your messages"), dated)
+        let undated = restoreSuccessMessage(nil, format: fmt)
+        XCTAssertTrue(undated.contains("can't be recovered"), undated)
+        XCTAssertFalse(undated.contains("nil"), undated)
+    }
+
+    func testTheBackupExplainerStatesItsLimits() {
+        XCTAssertTrue(backupScope.contains("snapshot"))
+        XCTAssertTrue(backupScope.contains("can't bring back messages from before the backup"))
+        XCTAssertTrue(backupScope.contains("rooms you join later"))
+        XCTAssertTrue(backupScope.contains("old recovery key stops working"))
+    }
+
+    func testLastBackupLineCoversEveryState() {
+        XCTAssertTrue(lastBackupText(.at(9), format: fmt).contains("T9"))
+        XCTAssertTrue(lastBackupText(.noBackup, format: fmt).contains("no key backup"))
+        XCTAssertTrue(lastBackupText(.at(nil), format: fmt).contains("date is unknown"))
+        XCTAssertTrue(lastBackupText(.unavailable, format: fmt).contains("Couldn't check"))
+        XCTAssertTrue(restoreScopeText(.at(7), format: fmt).contains("from T7 onward"))
+        XCTAssertTrue(restoreScopeText(.at(nil), format: fmt).contains("when the backup was made"))
     }
 }
 

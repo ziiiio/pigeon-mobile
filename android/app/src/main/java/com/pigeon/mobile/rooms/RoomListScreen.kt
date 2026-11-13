@@ -31,6 +31,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.LocalContext
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -137,6 +139,7 @@ fun RoomListRoute(
             onJoinRoom = vm::joinRoom,
             onBackup = vm::backup,
             onRestore = vm::restoreBackup,
+            onLoadBackupStatus = vm::loadBackupStatus,
             onRecoveryKeyDismiss = vm::clearRecoveryKey,
             onDismissError = vm::clearError,
             onDismissNotice = vm::clearNotice,
@@ -157,6 +160,7 @@ fun RoomListScreen(
     onJoinRoom: (String) -> Unit,
     onBackup: () -> Unit,
     onRestore: (String) -> Unit,
+    onLoadBackupStatus: () -> Unit,
     onRecoveryKeyDismiss: () -> Unit,
     onDismissError: () -> Unit,
     onDismissNotice: () -> Unit,
@@ -166,6 +170,7 @@ fun RoomListScreen(
     var showJoin by rememberSaveable { mutableStateOf(false) }
     var showMenu by rememberSaveable { mutableStateOf(false) }
     var showRestore by rememberSaveable { mutableStateOf(false) }
+    var showBackupInfo by rememberSaveable { mutableStateOf(false) }
     val busy = state.backupInProgress || state.restoreInProgress
 
     // Action outcomes as snackbars (above the FAB): failures in error colours
@@ -239,7 +244,9 @@ fun RoomListScreen(
                                 enabled = !busy,
                                 onClick = {
                                     showMenu = false
-                                    onBackup()
+                                    // Explain what a backup can't restore first.
+                                    onLoadBackupStatus()
+                                    showBackupInfo = true
                                 },
                             )
                             DropdownMenuItem(
@@ -247,6 +254,7 @@ fun RoomListScreen(
                                 enabled = !busy,
                                 onClick = {
                                     showMenu = false
+                                    onLoadBackupStatus()
                                     showRestore = true
                                 },
                             )
@@ -326,8 +334,19 @@ fun RoomListScreen(
             },
         )
     }
+    if (showBackupInfo) {
+        BackupInfoDialog(
+            lastBackup = state.lastBackup,
+            onDismiss = { showBackupInfo = false },
+            onBackup = {
+                showBackupInfo = false
+                onBackup()
+            },
+        )
+    }
     if (showRestore) {
         RestoreBackupDialog(
+            lastBackup = state.lastBackup,
             onDismiss = { showRestore = false },
             onRestore = { key ->
                 onRestore(key)
@@ -337,12 +356,16 @@ fun RoomListScreen(
     }
     // Shown once after a successful backup — the user must save this key.
     state.recoveryKey?.let { key ->
-        RecoveryKeyDialog(recoveryKey = key, onDismiss = onRecoveryKeyDismiss)
+        RecoveryKeyDialog(
+            recoveryKey = key,
+            createdAtMs = state.backupCreatedAtMs,
+            onDismiss = onRecoveryKeyDismiss,
+        )
     }
 }
 
 @Composable
-private fun RecoveryKeyDialog(recoveryKey: String, onDismiss: () -> Unit) {
+private fun RecoveryKeyDialog(recoveryKey: String, createdAtMs: Long?, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val copiedMsg = stringResource(R.string.backup_copied)
     AlertDialog(
@@ -351,6 +374,14 @@ private fun RecoveryKeyDialog(recoveryKey: String, onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(stringResource(R.string.backup_message))
+                // The period this key can restore — it can't reach further back.
+                createdAtMs?.let {
+                    Text(
+                        text = backupCoverageText(it, ::formatBackupTime),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 SelectionContainer {
                     Text(
                         text = recoveryKey,
@@ -400,19 +431,62 @@ private fun copySecret(context: Context, secret: String) {
     context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
 }
 
+/**
+ * Shown before every backup: what a backup is (a snapshot of the keys *now*),
+ * what it can't restore, and when the current one was made — so nobody learns
+ * the limits only after losing a phone.
+ */
 @Composable
-private fun RestoreBackupDialog(onDismiss: () -> Unit, onRestore: (String) -> Unit) {
+private fun BackupInfoDialog(lastBackup: LastBackup, onDismiss: () -> Unit, onBackup: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.backup_info_title)) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Text(BACKUP_SCOPE, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = lastBackupText(lastBackup, ::formatBackupTime),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onBackup) { Text(stringResource(R.string.backup_confirm)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.rooms_cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun RestoreBackupDialog(lastBackup: LastBackup, onDismiss: () -> Unit, onRestore: (String) -> Unit) {
     var key by rememberSaveable { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.restore_title)) },
         text = {
-            OutlinedTextField(
-                value = key,
-                onValueChange = { key = it },
-                label = { Text(stringResource(R.string.restore_key_hint)) },
-                singleLine = true,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = lastBackupText(lastBackup, ::formatBackupTime),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                if (lastBackup !is LastBackup.None) {
+                    Text(
+                        text = restoreScopeText(lastBackup, ::formatBackupTime),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                OutlinedTextField(
+                    value = key,
+                    onValueChange = { key = it },
+                    label = { Text(stringResource(R.string.restore_key_hint)) },
+                    singleLine = true,
+                )
+            }
         },
         confirmButton = {
             TextButton(onClick = { onRestore(key) }, enabled = key.isNotBlank()) {

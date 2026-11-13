@@ -19,6 +19,12 @@ struct RoomsState {
     /// (M4.3) — the only secret that can restore the backup; it never reaches the
     /// server. Cleared when the sheet dismisses.
     var recoveryKey: String?
+    /// When the backup behind `recoveryKey` was taken (Unix ms) — the sheet says
+    /// it only covers messages from then on.
+    var backupCreatedAtMs: Int64?
+    /// The account's server-side backup, as last fetched for the backup/restore
+    /// sheets (they say when it was taken, i.e. what it can't restore).
+    var lastBackup: LastBackup = .loading
     /// A key backup / restore is in flight — the UI shows progress and disables
     /// the actions.
     var backupInProgress = false
@@ -88,8 +94,12 @@ final class RoomsViewModel: ObservableObject {
         state.notice = nil
         Task {
             // Success: the recovery-key sheet opens, titled "Backup saved".
-            do { state.recoveryKey = try await client.backup() }
-            catch { state.actionError = backupErrorMessage(error) }
+            do {
+                let made = try await client.backup()
+                state.backupCreatedAtMs = made.createdAtMs
+                state.lastBackup = .at(made.createdAtMs)
+                state.recoveryKey = made.recoveryKey
+            } catch { state.actionError = backupErrorMessage(error) }
             state.backupInProgress = false
         }
     }
@@ -103,14 +113,29 @@ final class RoomsViewModel: ObservableObject {
         state.notice = nil
         Task {
             do {
-                try await client.restoreBackup(recoveryKey: recoveryKey.trimmed)
-                state.notice = restoreOK
+                let restored = try await client.restoreBackup(recoveryKey: recoveryKey.trimmed)
+                state.notice = restoreSuccessMessage(restored.backedUpAtMs, format: formatBackupTime)
             } catch { state.actionError = restoreErrorMessage(error) }
             state.restoreInProgress = false
         }
     }
 
-    func clearRecoveryKey() { state.recoveryKey = nil }
+    /// Fetch whether a backup exists and when it was taken, for the backup and
+    /// restore sheets. A failure isn't something the user must act on — the
+    /// sheet just says the date is unavailable.
+    func loadBackupStatus() {
+        state.lastBackup = .loading
+        Task {
+            do {
+                state.lastBackup = try await client.backupStatus().map { .at($0.backedUpAtMs) } ?? .noBackup
+            } catch { state.lastBackup = .unavailable }
+        }
+    }
+
+    func clearRecoveryKey() {
+        state.recoveryKey = nil
+        state.backupCreatedAtMs = nil
+    }
     func clearError() { state.actionError = nil }
     func clearNotice() { state.notice = nil }
 
@@ -126,11 +151,74 @@ extension String {
     }
 }
 
-/// Shown after a successful restore. Honest about scope: restoring brings back the
-/// device's identity + room memberships (new messages decrypt), not history that
-/// forward secrecy already destroyed. Mirrors Android's `RESTORE_OK`.
-let restoreOK =
-    "Encryption keys restored. New messages in your encrypted rooms will decrypt on this device."
+/// The account's key backup, as the backup/restore sheets know it.
+enum LastBackup: Equatable {
+    case loading
+    /// No backup on the server yet.
+    case noBackup
+    /// A backup exists; nil when it was stored without a time (reference CLI).
+    case at(Int64?)
+    /// Couldn't ask the server.
+    case unavailable
+}
+
+// What a key backup can and can't do, said up front (M4.3). A backup is a
+// snapshot of this device's MLS keys at one moment: it restores rooms and
+// messages from that moment on, never messages the device had already read —
+// MLS deletes those keys after use (forward secrecy), so nothing can recover
+// them. See design/history-backup.md in ../pigeon. All wording mirrors Android's
+// `RoomsViewModel.kt` — keep them in lockstep.
+
+/// Shown before every backup, beside the last-backup line.
+let backupScope =
+    "A key backup is a snapshot of this device's encryption keys at the moment you make it. "
+    + "Restoring it on a new or reset device:\n"
+    + "• lets you read messages sent after the backup, in rooms you were in when you made it;\n"
+    + "• can't bring back messages from before the backup — Pigeon deletes those keys once "
+    + "they've been used, so nobody can recover them, not even the server;\n"
+    + "• doesn't include rooms you join later — back up again after joining one.\n"
+    + "A new backup replaces the previous one, and the old recovery key stops working."
+
+/// The "last backup" line in the backup and restore sheets.
+func lastBackupText(_ last: LastBackup, format: (Int64) -> String) -> String {
+    switch last {
+    case .loading: return "Checking for an existing backup…"
+    case .noBackup: return "You have no key backup yet."
+    case let .at(ms):
+        guard let ms else { return "You have a backup, but its date is unknown." }
+        return "Your last backup was made \(format(ms))."
+    case .unavailable: return "Couldn't check for an existing backup."
+    }
+}
+
+/// In the restore sheet: what restoring *this* backup will and won't recover.
+func restoreScopeText(_ last: LastBackup, format: (Int64) -> String) -> String {
+    if case let .at(ms?) = last {
+        return "Restoring recovers your rooms and messages from \(format(ms)) onward. "
+            + "Messages from before then can't be recovered."
+    }
+    return "Restoring recovers your rooms and messages from when the backup was made onward. "
+        + "Messages from before then can't be recovered."
+}
+
+/// In the "Backup saved" sheet: the period this backup covers.
+func backupCoverageText(_ createdAtMs: Int64, format: (Int64) -> String) -> String {
+    "This backup covers messages from \(format(createdAtMs)) onward. "
+        + "Messages from before then can't be restored with it."
+}
+
+/// Shown after a successful restore: what came back, and what can't.
+func restoreSuccessMessage(_ backedUpAtMs: Int64?, format: (Int64) -> String) -> String {
+    let since = backedUpAtMs.map { "your backup of \(format($0))" } ?? "your backup"
+    return "Encryption keys restored from \(since). New messages will decrypt; "
+        + "messages from before the backup can't be recovered."
+}
+
+/// The user-facing date for a backup time, in the device's locale + zone.
+func formatBackupTime(_ ms: Int64) -> String {
+    Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        .formatted(date: .abbreviated, time: .shortened)
+}
 
 /// The message for a failed key **backup** (M4.3). Branches on the typed error
 /// (never on text) and never shows the raw error. Mirrors Android's

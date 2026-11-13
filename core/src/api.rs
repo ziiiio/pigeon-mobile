@@ -421,28 +421,42 @@ impl Api {
     // stash the encrypted MLS device-state blob.
 
     /// `PUT /room_keys/key/{room_id}/{session_id}` — store the opaque encrypted
-    /// backup blob (base64) under `{ "blob": ... }` (M4.3).
+    /// backup blob (base64) under `{ "blob": ..., "created_at_ms": ... }` (M4.3).
+    /// `created_at_ms` is when the backup was taken: the UI tells the user a
+    /// backup only covers messages from that moment on. It sits *beside* the
+    /// ciphertext, unencrypted — that reveals nothing new (the server sees the
+    /// PUT's arrival time anyway), and it is display-only: nothing trusts it.
     pub async fn put_room_key(
         &self,
         room_id: &str,
         session_id: &str,
         blob_b64: &str,
+        created_at_ms: i64,
     ) -> Result<(), ApiError> {
         let path = format!("/_pigeon/client/v1/room_keys/key/{room_id}/{session_id}");
-        self.put(&path, &json!({ "blob": blob_b64 })).await?;
+        self.put(
+            &path,
+            &json!({ "blob": blob_b64, "created_at_ms": created_at_ms }),
+        )
+        .await?;
         Ok(())
     }
 
-    /// `GET /room_keys/key/{room_id}/{session_id}` — fetch the stored backup blob
-    /// (base64), or `None` if nothing is backed up (server `404`/`P_NOT_FOUND`).
+    /// `GET /room_keys/key/{room_id}/{session_id}` — fetch the stored backup, or
+    /// `None` if nothing is backed up (server `404`/`P_NOT_FOUND`). A response
+    /// without a `blob` is treated as no backup. `created_at_ms` is `None` for a
+    /// backup written without it (the reference CLI, or an older app build).
     pub async fn get_room_key(
         &self,
         room_id: &str,
         session_id: &str,
-    ) -> Result<Option<String>, ApiError> {
+    ) -> Result<Option<StoredBackup>, ApiError> {
         let path = format!("/_pigeon/client/v1/room_keys/key/{room_id}/{session_id}");
         match self.get(&path).await {
-            Ok(resp) => Ok(resp["blob"].as_str().map(str::to_owned)),
+            Ok(resp) => Ok(resp["blob"].as_str().map(|blob| StoredBackup {
+                blob: blob.to_owned(),
+                created_at_ms: resp["created_at_ms"].as_i64(),
+            })),
             Err(ApiError::Server {
                 code: ErrorCode::NotFound,
                 ..
@@ -618,6 +632,14 @@ fn parse_auth(body: &Value) -> Result<AuthResponse, ApiError> {
         device_id: field("device_id")?,
         access_token: field("access_token")?,
     })
+}
+
+/// A key backup as stored on the server (M4.3): the base64 AEAD blob plus, when
+/// the writer recorded it, the time it was taken (Unix ms).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBackup {
+    pub blob: String,
+    pub created_at_ms: Option<i64>,
 }
 
 #[cfg(test)]

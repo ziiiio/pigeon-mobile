@@ -544,6 +544,20 @@ UI rules both platforms must follow (each was once broken on one of them):
   `Api { code: NotFound }`, a **wrong recovery key** is `Crypto`. Before this, Android showed
   the raw exception as sticky red text, iOS used the *sign-in* messages (a 403 read "Incorrect
   username or password"), and a successful restore showed nothing at all.
+- **Tell users what a backup can't restore — before they rely on it.** A key backup is a
+  snapshot of the device's MLS keys at one moment. MLS deletes each message key after use
+  (forward secrecy), so a restore can never bring back messages from *before* the backup, and
+  rooms joined *after* it aren't in it. People assume "backup" means "everything", so both apps
+  say it at every step: **Back up encryption keys** opens an explainer (`BACKUP_SCOPE` /
+  `backupScope`) with the current backup's time before **Back up now**; the **Backup saved**
+  dialog says "This backup covers messages from … onward"; the restore dialog shows the
+  backup time; and a successful restore repeats that earlier messages can't be recovered.
+  The time comes from the core: `backup()` stamps `created_at_ms` beside the encrypted blob in
+  the `room_keys` slot (the server already sees the upload time, so nothing new leaks; it is
+  display-only and nothing trusts it), and `backup_status()` / `restore_backup()` hand it back
+  as `BackupStatus { backed_up_at_ms }`. A backup written by the CLI or an older build has no
+  time, so every message has an "unknown date" wording; all of them are pure functions in each
+  `RoomsViewModel`, unit-tested on both platforms with the same wording.
 - **A secret the user must save gets a Copy button, not just text.** The backup recovery key
   is shown once. Text in an Android `AlertDialog` is barely selectable (the dialog is its own
   window, so the selection toolbar often never appears) and iOS alert text can't be selected

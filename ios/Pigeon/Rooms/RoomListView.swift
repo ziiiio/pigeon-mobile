@@ -24,6 +24,7 @@ struct RoomListView: View {
     @State private var showingCreate = false
     @State private var showingJoin = false
     @State private var showingRestore = false
+    @State private var showingBackupInfo = false
 
     init(session: Session, client: PigeonClient, signingOut: Bool,
          signOutError: String?, onSignOut: @escaping () -> Void) {
@@ -57,15 +58,25 @@ struct RoomListView: View {
             TextEntrySheet(title: "Join room", field: "Room id (!room:server)",
                            confirm: "Join") { vm.joinRoom($0) }
         }
+        // Before every backup: what it can't restore, and when the last one was made.
+        .sheet(isPresented: $showingBackupInfo) {
+            BackupInfoSheet(lastBackup: vm.state.lastBackup) { vm.backup() }
+        }
         .sheet(isPresented: $showingRestore) {
             TextEntrySheet(title: "Restore keys", field: "Recovery key",
-                           confirm: "Restore") { vm.restoreBackup($0) }
+                           confirm: "Restore",
+                           header: lastBackupText(vm.state.lastBackup, format: formatBackupTime),
+                           footer: vm.state.lastBackup == .noBackup ? nil
+                               : restoreScopeText(vm.state.lastBackup, format: formatBackupTime)) {
+                vm.restoreBackup($0)
+            }
         }
         // A sheet, not an alert: alert text can't be selected or copied, and the
         // user must be able to save this key (it's shown once).
         .sheet(isPresented: Binding(get: { vm.state.recoveryKey != nil },
                                     set: { if !$0 { vm.clearRecoveryKey() } })) {
-            RecoveryKeySheet(recoveryKey: vm.state.recoveryKey ?? "") { vm.clearRecoveryKey() }
+            RecoveryKeySheet(recoveryKey: vm.state.recoveryKey ?? "",
+                             createdAtMs: vm.state.backupCreatedAtMs) { vm.clearRecoveryKey() }
         }
         .alert("Error",
                isPresented: Binding(get: { vm.state.actionError != nil },
@@ -178,9 +189,15 @@ struct RoomListView: View {
             Button { showingCreate = true } label: { Label("New room", systemImage: "plus.bubble") }
             Button { showingJoin = true } label: { Label("Join room", systemImage: "arrow.right.circle") }
             Divider()
-            Button { vm.backup() } label: { Label("Back up keys", systemImage: "key") }
+            Button {
+                vm.loadBackupStatus()
+                showingBackupInfo = true
+            } label: { Label("Back up keys", systemImage: "key") }
                 .disabled(vm.state.backupInProgress || vm.state.restoreInProgress)
-            Button { showingRestore = true } label: { Label("Restore keys", systemImage: "arrow.clockwise") }
+            Button {
+                vm.loadBackupStatus()
+                showingRestore = true
+            } label: { Label("Restore keys", systemImage: "arrow.clockwise") }
                 .disabled(vm.state.backupInProgress || vm.state.restoreInProgress)
         } label: {
             Image(systemName: "plus")
@@ -232,11 +249,14 @@ private struct CreateRoomSheet: View {
     }
 }
 
-/// A one-field sheet reused for Join (room id) and Restore (recovery key).
+/// A one-field sheet reused for Join (room id) and Restore (recovery key), with
+/// optional explanatory text above (`header`) and below (`footer`) the field.
 private struct TextEntrySheet: View {
     let title: String
     let field: String
     let confirm: String
+    var header: String? = nil
+    var footer: String? = nil
     let onConfirm: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -244,9 +264,15 @@ private struct TextEntrySheet: View {
     var body: some View {
         NavigationView {
             Form {
-                TextField(field, text: $text)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
+                Section {
+                    TextField(field, text: $text)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    if let header { Text(header) }
+                } footer: {
+                    if let footer { Text(footer) }
+                }
             }
             .navigationTitle(title)
             .toolbar {
@@ -266,6 +292,7 @@ private struct TextEntrySheet: View {
 /// to a stray gesture — only Done closes it. Mirrors Android's `RecoveryKeyDialog`.
 private struct RecoveryKeySheet: View {
     let recoveryKey: String
+    let createdAtMs: Int64?
     let onDone: () -> Void
     @State private var copied = false
 
@@ -292,6 +319,14 @@ private struct RecoveryKeySheet: View {
                          + "your keys on a new device, it is never sent to the server, and it "
                          + "won't be shown again.")
                 }
+                // The period this key can restore — it can't reach further back.
+                if let createdAtMs {
+                    Section {
+                        Label(backupCoverageText(createdAtMs, format: formatBackupTime),
+                              systemImage: "clock.badge.exclamationmark")
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
             .navigationTitle("Backup saved")
             .navigationBarTitleDisplayMode(.inline)
@@ -300,6 +335,33 @@ private struct RecoveryKeySheet: View {
             }
         }
         .interactiveDismissDisabled()
+    }
+}
+
+/// Shown before every backup (M4.3): what a backup is (a snapshot of the keys
+/// *now*), what it can't restore, and when the current one was made — so nobody
+/// learns the limits only after losing a phone. Mirrors Android's
+/// `BackupInfoDialog`.
+private struct BackupInfoSheet: View {
+    let lastBackup: LastBackup
+    let onBackup: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section { Text(backupScope) }
+                Section { Text(lastBackupText(lastBackup, format: formatBackupTime)).font(.callout) }
+            }
+            .navigationTitle("Back up keys")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Back up now") { onBackup(); dismiss() }
+                }
+            }
+        }
     }
 }
 

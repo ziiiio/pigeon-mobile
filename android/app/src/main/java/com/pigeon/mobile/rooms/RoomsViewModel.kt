@@ -26,6 +26,12 @@ data class RoomsState(
      * (M4.3). The user must save it — it's the only secret that can restore the
      * backup, and it never reaches the server. Cleared when the dialog dismisses. */
     val recoveryKey: String? = null,
+    /** When the backup behind [recoveryKey] was taken (Unix ms) — the dialog says
+     * it only covers messages from then on. */
+    val backupCreatedAtMs: Long? = null,
+    /** The account's server-side backup, as last fetched for the backup/restore
+     * dialogs (they say when it was taken, i.e. what it can't restore). */
+    val lastBackup: LastBackup = LastBackup.Loading,
     /** A key backup is in flight — the UI shows progress and disables the action. */
     val backupInProgress: Boolean = false,
     /** A key restore is in flight — same. */
@@ -119,7 +125,13 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
         viewModelScope.launch {
             _state.value = try {
                 // Success: the recovery-key dialog opens, headed "Backup saved".
-                _state.value.copy(backupInProgress = false, recoveryKey = client.backup())
+                val made = client.backup()
+                _state.value.copy(
+                    backupInProgress = false,
+                    recoveryKey = made.recoveryKey,
+                    backupCreatedAtMs = made.createdAtMs,
+                    lastBackup = LastBackup.At(made.createdAtMs),
+                )
             } catch (e: CoreException) {
                 _state.value.copy(backupInProgress = false, actionError = backupErrorMessage(e))
             }
@@ -133,11 +145,31 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
         _state.value = _state.value.copy(restoreInProgress = true, actionError = null, notice = null)
         viewModelScope.launch {
             _state.value = try {
-                client.restoreBackup(recoveryKey.trim())
-                _state.value.copy(restoreInProgress = false, notice = RESTORE_OK)
+                val restored = client.restoreBackup(recoveryKey.trim())
+                _state.value.copy(
+                    restoreInProgress = false,
+                    notice = restoreSuccessMessage(restored.backedUpAtMs, ::formatBackupTime),
+                )
             } catch (e: CoreException) {
                 _state.value.copy(restoreInProgress = false, actionError = restoreErrorMessage(e))
             }
+        }
+    }
+
+    /**
+     * Fetch whether a backup exists and when it was taken, for the backup and
+     * restore dialogs. Failure isn't an error the user must act on — the dialog
+     * just says the date is unavailable.
+     */
+    fun loadBackupStatus() {
+        _state.value = _state.value.copy(lastBackup = LastBackup.Loading)
+        viewModelScope.launch {
+            val last = try {
+                client.backupStatus()?.let { LastBackup.At(it.backedUpAtMs) } ?: LastBackup.None
+            } catch (e: CoreException) {
+                LastBackup.Unavailable
+            }
+            _state.value = _state.value.copy(lastBackup = last)
         }
     }
 
@@ -148,7 +180,7 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
 
     /** Dismiss the shown recovery key (the user has saved it). */
     fun clearRecoveryKey() {
-        _state.value = _state.value.copy(recoveryKey = null)
+        _state.value = _state.value.copy(recoveryKey = null, backupCreatedAtMs = null)
     }
 
     fun clearError() {
@@ -156,11 +188,74 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
     }
 }
 
-/** Shown after a successful restore. Honest about scope: restoring brings back the
- * device's identity + room memberships (new messages decrypt), not history that
- * forward secrecy already destroyed — see design/history-backup.md in ../pigeon. */
-internal const val RESTORE_OK =
-    "Encryption keys restored. New messages in your encrypted rooms will decrypt on this device."
+/** The account's key backup, as the backup/restore dialogs know it. */
+sealed interface LastBackup {
+    data object Loading : LastBackup
+    /** No backup on the server yet. */
+    data object None : LastBackup
+    /** A backup exists; [atMs] is null when it was stored without a time (CLI). */
+    data class At(val atMs: Long?) : LastBackup
+    /** Couldn't ask the server. */
+    data object Unavailable : LastBackup
+}
+
+/*
+ * What a key backup can and can't do, said up front (M4.3). A backup is a
+ * snapshot of this device's MLS keys at one moment: it restores rooms and
+ * messages from that moment on, never messages the device had already read —
+ * MLS deletes those keys after use (forward secrecy), so nothing can recover
+ * them. See design/history-backup.md in ../pigeon. All wording mirrors iOS
+ * `RoomsViewModel.swift` — keep them in lockstep.
+ */
+
+/** Shown before every backup, beside the last-backup line. */
+internal const val BACKUP_SCOPE =
+    "A key backup is a snapshot of this device's encryption keys at the moment you make it. " +
+        "Restoring it on a new or reset device:\n" +
+        "• lets you read messages sent after the backup, in rooms you were in when you made it;\n" +
+        "• can't bring back messages from before the backup — Pigeon deletes those keys once " +
+        "they've been used, so nobody can recover them, not even the server;\n" +
+        "• doesn't include rooms you join later — back up again after joining one.\n" +
+        "A new backup replaces the previous one, and the old recovery key stops working."
+
+/** The "last backup" line in the backup and restore dialogs. */
+fun lastBackupText(last: LastBackup, format: (Long) -> String): String = when (last) {
+    LastBackup.Loading -> "Checking for an existing backup…"
+    LastBackup.None -> "You have no key backup yet."
+    is LastBackup.At ->
+        last.atMs?.let { "Your last backup was made ${format(it)}." }
+            ?: "You have a backup, but its date is unknown."
+    LastBackup.Unavailable -> "Couldn't check for an existing backup."
+}
+
+/** In the restore dialog: what restoring *this* backup will and won't recover. */
+fun restoreScopeText(last: LastBackup, format: (Long) -> String): String {
+    val at = (last as? LastBackup.At)?.atMs
+    return if (at != null) {
+        "Restoring recovers your rooms and messages from ${format(at)} onward. " +
+            "Messages from before then can't be recovered."
+    } else {
+        "Restoring recovers your rooms and messages from when the backup was made onward. " +
+            "Messages from before then can't be recovered."
+    }
+}
+
+/** In the "Backup saved" dialog: the period this backup covers. */
+fun backupCoverageText(createdAtMs: Long, format: (Long) -> String): String =
+    "This backup covers messages from ${format(createdAtMs)} onward. " +
+        "Messages from before then can't be restored with it."
+
+/** Shown after a successful restore: what came back, and what can't. */
+fun restoreSuccessMessage(backedUpAtMs: Long?, format: (Long) -> String): String {
+    val since = backedUpAtMs?.let { "your backup of ${format(it)}" } ?: "your backup"
+    return "Encryption keys restored from $since. New messages will decrypt; " +
+        "messages from before the backup can't be recovered."
+}
+
+/** The user-facing date for a backup time, in the device's locale + zone. */
+fun formatBackupTime(ms: Long): String =
+    java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+        .format(java.util.Date(ms))
 
 /**
  * The message for a failed key **backup** (M4.3). Branches on the typed error
