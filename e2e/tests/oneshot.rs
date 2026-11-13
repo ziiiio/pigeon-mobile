@@ -88,10 +88,18 @@ async fn wait_until<F: Fn() -> bool>(label: &str, f: F) {
 /// The M2 exit gate: two clients hold a plaintext conversation through a real
 /// homeserver — create + invite + join (membership), then messages flow both
 /// ways over the sync loop. This drives the same FFI the UI does.
+/// The core's key store is **process-global** (`set_key_store`), and every test
+/// here installs its own — so tests running in parallel (cargo's default) swap
+/// each other's store mid-flow: `restore_session` then reloads another test's
+/// account, and MLS state lands in the wrong store. Each test holds this lock for
+/// its whole run, which serialises them without needing `--test-threads=1`.
+static GLOBAL_KEY_STORE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn two_clients_hold_a_plaintext_conversation() -> anyhow::Result<()> {
     // A shared key store is fine: each client keeps its token in-core, and the
     // conversation path never calls `restore_session` (which reads the blob).
+    let _serial = GLOBAL_KEY_STORE.lock().await;
     set_key_store(Box::new(MemStore::default()));
 
     let (base, _ts) = spawn().await?;
@@ -126,9 +134,7 @@ async fn two_clients_hold_a_plaintext_conversation() -> anyhow::Result<()> {
     }
 
     // Alice sends; Bob receives it over sync.
-    alice
-        .send_message(room.clone(), "hello bob".into())
-        .await?;
+    alice.send_message(room.clone(), "hello bob".into()).await?;
     {
         let bob = bob.clone();
         let room = room.clone();
@@ -186,6 +192,7 @@ async fn two_clients_hold_a_plaintext_conversation() -> anyhow::Result<()> {
 #[tokio::test]
 async fn two_clients_exchange_encrypted_messages() -> anyhow::Result<()> {
     let store = MemStore::default();
+    let _serial = GLOBAL_KEY_STORE.lock().await;
     set_key_store(Box::new(store.clone()));
     let (base, _ts) = spawn().await?;
 
@@ -284,6 +291,7 @@ async fn register_login_restore_against_real_homeserver() -> anyhow::Result<()> 
     // something to reload. Keep a handle so the logout assertions below can
     // re-inject the pre-logout blob and prove the token was revoked server-side.
     let store = MemStore::default();
+    let _serial = GLOBAL_KEY_STORE.lock().await;
     set_key_store(Box::new(store.clone()));
 
     let (base, _ts) = spawn().await?;
