@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Pigeon app icon — the SINGLE SOURCE for both apps (see README.md here).
+    iOS:     rendered to ios/Pigeon/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+    Android: the same shapes, translated path-for-path into
+             android/app/src/main/res/drawable/ic_launcher_{background,foreground,monochrome}.xml
+             (+ legacy PNGs rendered for API 24-25).
+    Change a shape here -> change it there too, then run ./render.sh.
+    Full-bleed square: each platform applies its own mask. The bird stays
+    inside a radius-469 circle around the centre: Android's 66dp safe zone,
+    measured against the 72dp visible area this canvas maps onto.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B8CFF"/>
+      <stop offset="1" stop-color="#3B3FD8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g transform="translate(-1 -14)">
+    <path fill="#FFFFFF" d="M610 410 C720 450 740 600 640 680 C560 744 430 750 330 712 L236 772 L268 668 C330 560 450 440 610 410 Z"/>
+    <path fill="#FFFFFF" d="M572 424 C590 408 600 390 610 360 L690 430 L640 470 Z"/>
+    <path fill="#FFFFFF" d="M640 280 A88 88 0 1 1 639.9 280 Z"/>
+    <path fill="#FFC94D" d="M716 352 L790 382 L716 404 Z"/>
+    <path fill="#D6E0FF" d="M600 500 C560 590 480 650 380 672 C470 690 580 660 630 590 C650 560 640 520 600 500 Z"/>
+    <path fill="#3B3FD8" d="M664 340 A16 16 0 1 1 663.9 340 Z"/>
+  </g>
+</svg>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pigeon app icon (adaptive, API 26+). Same shapes as the single source,
+  assets/icon/pigeon-icon.svg, translated path-for-path: keep them in sync.
+  Viewport 1536 = the 108dp layer. Launchers show only the middle 72dp, so the
+  SVG's 1024 canvas is offset by 256: what is visible here is exactly the
+  square iOS shows, and the bird lands at the same size and place on both.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1536"
+    android:viewportHeight="1536">
+    <!-- SVG: transform="translate(-1 -14)", plus the 256 offset -->
+    <group
+        android:translateX="255"
+        android:translateY="242">
+        <!-- body + tail -->
+        <path android:fillColor="#FFFFFFFF" android:pathData="M610 410 C720 450 740 600 640 680 C560 744 430 750 330 712 L236 772 L268 668 C330 560 450 440 610 410 Z" />
+        <!-- neck -->
+        <path android:fillColor="#FFFFFFFF" android:pathData="M572 424 C590 408 600 390 610 360 L690 430 L640 470 Z" />
+        <!-- head -->
+        <path android:fillColor="#FFFFFFFF" android:pathData="M640 280 A88 88 0 1 1 639.9 280 Z" />
+        <!-- beak -->
+        <path android:fillColor="#FFFFC94D" android:pathData="M716 352 L790 382 L716 404 Z" />
+        <!-- wing -->
+        <path android:fillColor="#FFD6E0FF" android:pathData="M600 500 C560 590 480 650 380 672 C470 690 580 660 630 590 C650 560 640 520 600 500 Z" />
+        <!-- eye -->
+        <path android:fillColor="#FF3B3FD8" android:pathData="M664 340 A16 16 0 1 1 663.9 340 Z" />
+    </group>
+</vector>

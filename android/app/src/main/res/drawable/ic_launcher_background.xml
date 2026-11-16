@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pigeon app icon (adaptive, API 26+). Same shapes as the single source,
+  assets/icon/pigeon-icon.svg, translated path-for-path: keep them in sync.
+  Viewport 1536 = the 108dp layer. Launchers show only the middle 72dp, so the
+  SVG's 1024 canvas is offset by 256: what is visible here is exactly the
+  square iOS shows, and the bird lands at the same size and place on both.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1536"
+    android:viewportHeight="1536">
+    <path android:pathData="M0,0h1536v1536h-1536z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="256"
+                android:startY="256"
+                android:endX="1280"
+                android:endY="1280"
+                android:startColor="#FF5B8CFF"
+                android:endColor="#FF3B3FD8"
+                android:tileMode="clamp" />
+        </aapt:attr>
+    </path>
+</vector>

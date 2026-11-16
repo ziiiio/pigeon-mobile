@@ -179,6 +179,7 @@ android/                    # the Android app (Gradle, Kotlin, Jetpack Compose)
     app/build.gradle.kts    # the build glue (cargo-ndk + UniFFI codegen)
 ios/                        # the iOS app (Swift, SwiftUI; the same core as an xcframework)
 e2e/                        # the oneshot-homeserver end-to-end test (needs Docker)
+assets/icon/                # pigeon-icon.svg — the ONE source of both apps' icon (+ render.sh)
 docs/                       # ARCHITECTURE.md, this guide
 ```
 
@@ -579,7 +580,7 @@ core — see `ARCHITECTURE.md` §6.
 
 ```
 1. cargoNdkBuild          cargo-ndk cross-compiles the core → libpigeon_mobile_core.so
-   (Exec task)            for arm64-v8a + x86_64
+   (Exec task)            for arm64-v8a + x86_64, debug info stripped (see below)
         │
 2. generateUniffiBindings runs the uniffi-bindgen bin against the built .so
    (Exec task)            → uniffi/pigeon_mobile_core/pigeon_mobile_core.kt
@@ -592,6 +593,16 @@ core — see `ARCHITECTURE.md` §6.
 
 **The toolchain (pinned in `android/`):** Gradle **9.6.1** (wrapper), AGP **9.2.1**, Kotlin
 **2.2.10**, `compileSdk`/`targetSdk` **36**, `minSdk` **24**, NDK **r28c** on the host.
+
+**Why the cross-build strips debug info.** A debug Rust `.so` carries full DWARF: ~145 MB
+per ABI, a ~450 MB APK that took minutes to install and stopped fitting on a default 6 GB
+emulator (`INSTALL_FAILED_INSUFFICIENT_STORAGE`). `cargoNdkBuild` sets
+`CARGO_PROFILE_DEV_STRIP=debuginfo` (~29 MB per ABI, ~68 MB APK). Symbol tables survive, so
+UniFFI's library-mode bindgen and panic backtraces are unaffected; host builds (tests,
+bindgen) don't get the override. AGP's own `stripDebugDebugSymbols` doesn't do this for us:
+it only strips when it finds the NDK version it expects. If an APK is ever unexpectedly
+large, also check for packaging slack: incremental packaging appends to the old zip, and
+deleting `app-debug.apk` before rebuilding shrinks it back.
 
 A few things that trip people up (all consequences of AGP 9's **built-in Kotlin**):
 
@@ -738,6 +749,14 @@ And two learned in this repo specifically:
 - **Anything the UI shows** → the Android layer (a Compose screen + a thin view-model
   method). If a view-model method starts parsing events or building request bodies, you're
   in the wrong layer.
+- **The app icon** → `assets/icon/pigeon-icon.svg` is the single source, so both apps
+  look the same on the home screen. iOS uses a PNG rendered from it
+  (`Assets.xcassets/AppIcon`); Android 8+ uses an *adaptive icon*: a background layer and a
+  foreground layer the launcher masks into its own shape (circle, squircle…), drawn as
+  vector drawables that copy the SVG's paths. Only the middle 72dp of the 108dp layer is
+  ever visible, so the drawables offset the SVG's canvas onto exactly that area: that is
+  what makes the bird the same size on both platforms. Change the SVG, mirror the shape in
+  the Android drawables, run `assets/icon/render.sh`. Details in `assets/icon/README.md`.
 - **A new error the UI must handle** → add a `CoreError` variant (field named `reason`!),
   map it in `From`, and add a branch in `AuthError.kt`.
 
