@@ -72,10 +72,23 @@ class BackupFeedbackTest {
     fun the_backup_explainer_states_its_limits() {
         // Said before every backup: it's a snapshot, older messages are gone for
         // good, later rooms aren't covered, and a new backup retires the old key.
-        assertTrue(BACKUP_SCOPE.contains("snapshot"))
-        assertTrue(BACKUP_SCOPE.contains("can't bring back messages from before the backup"))
-        assertTrue(BACKUP_SCOPE.contains("rooms you join later"))
+        assertTrue(BACKUP_SCOPE.contains("as they are right now"))
+        assertTrue(BACKUP_SCOPE.contains("can't read messages from before the backup"))
+        assertTrue(BACKUP_SCOPE.contains("Rooms you join after the backup aren't included"))
         assertTrue(BACKUP_SCOPE.contains("old recovery key stops working"))
+    }
+
+    @Test
+    fun backup_messages_are_plain_sentences() {
+        // Short sentences read better than semicolon-chained clauses.
+        val all = listOf(
+            BACKUP_SCOPE,
+            restoreSuccessMessage(1L, fmt), restoreSuccessMessage(null, fmt),
+            backupCoverageText(1L, fmt),
+            restoreScopeText(LastBackup.At(1L), fmt), restoreScopeText(LastBackup.At(null), fmt),
+        ) + listOf(LastBackup.Loading, LastBackup.None, LastBackup.At(1L), LastBackup.At(null), LastBackup.Unavailable)
+            .map { lastBackupText(it, fmt) }
+        for (m in all) assertFalse(m, m.contains(";"))
     }
 
     @Test

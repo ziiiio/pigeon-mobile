@@ -165,7 +165,7 @@ final class BackupFeedbackTests: XCTestCase {
                        "Backup failed — couldn't reach the server. Check your connection and try again.")
         let fmt: (Int64) -> String = { "T\($0)" }
         XCTAssertEqual(restoreSuccessMessage(42, format: fmt),
-                       "Encryption keys restored from your backup of T42. New messages will decrypt; "
+                       "Encryption keys restored from your backup of T42. New messages will decrypt, but "
                        + "messages from before the backup can't be recovered.")
         XCTAssertEqual(backupCoverageText(7, format: fmt),
                        "This backup covers messages from T7 onward. Messages from before then can't be restored with it.")
@@ -184,10 +184,21 @@ final class BackupFeedbackTests: XCTestCase {
     }
 
     func testTheBackupExplainerStatesItsLimits() {
-        XCTAssertTrue(backupScope.contains("snapshot"))
-        XCTAssertTrue(backupScope.contains("can't bring back messages from before the backup"))
-        XCTAssertTrue(backupScope.contains("rooms you join later"))
+        XCTAssertTrue(backupScope.contains("as they are right now"))
+        XCTAssertTrue(backupScope.contains("can't read messages from before the backup"))
+        XCTAssertTrue(backupScope.contains("Rooms you join after the backup aren't included"))
         XCTAssertTrue(backupScope.contains("old recovery key stops working"))
+    }
+
+    func testBackupMessagesArePlainSentences() {
+        // Short sentences read better than semicolon-chained clauses.
+        let states: [LastBackup] = [.loading, .noBackup, .at(1), .at(nil), .unavailable]
+        let all = [backupScope,
+                   restoreSuccessMessage(1, format: fmt), restoreSuccessMessage(nil, format: fmt),
+                   backupCoverageText(1, format: fmt),
+                   restoreScopeText(.at(1), format: fmt), restoreScopeText(.at(nil), format: fmt)]
+            + states.map { lastBackupText($0, format: fmt) }
+        for m in all { XCTAssertFalse(m.contains(";"), m) }
     }
 
     func testLastBackupLineCoversEveryState() {

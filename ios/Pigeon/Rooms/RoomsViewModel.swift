@@ -171,13 +171,14 @@ enum LastBackup: Equatable {
 
 /// Shown before every backup, beside the last-backup line.
 let backupScope =
-    "A key backup is a snapshot of this device's encryption keys at the moment you make it. "
-    + "Restoring it on a new or reset device:\n"
-    + "• lets you read messages sent after the backup, in rooms you were in when you made it;\n"
-    + "• can't bring back messages from before the backup — Pigeon deletes those keys once "
-    + "they've been used, so nobody can recover them, not even the server;\n"
-    + "• doesn't include rooms you join later — back up again after joining one.\n"
-    + "A new backup replaces the previous one, and the old recovery key stops working."
+    "A backup saves this device's encryption keys as they are right now.\n"
+    + "\n"
+    + "If you restore it on a new or reset device:\n"
+    + "• You can read messages sent after the backup.\n"
+    + "• You can't read messages from before the backup. Pigeon deletes those keys once they've been used, so no one can get them back, not even the server.\n"
+    + "• Rooms you join after the backup aren't included. Back up again after you join a room.\n"
+    + "\n"
+    + "Each new backup replaces the previous one, and your old recovery key stops working."
 
 /// The "last backup" line in the backup and restore sheets.
 func lastBackupText(_ last: LastBackup, format: (Int64) -> String) -> String {
@@ -210,7 +211,7 @@ func backupCoverageText(_ createdAtMs: Int64, format: (Int64) -> String) -> Stri
 /// Shown after a successful restore: what came back, and what can't.
 func restoreSuccessMessage(_ backedUpAtMs: Int64?, format: (Int64) -> String) -> String {
     let since = backedUpAtMs.map { "your backup of \(format($0))" } ?? "your backup"
-    return "Encryption keys restored from \(since). New messages will decrypt; "
+    return "Encryption keys restored from \(since). New messages will decrypt, but "
         + "messages from before the backup can't be recovered."
 }
 
