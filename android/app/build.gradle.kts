@@ -24,6 +24,14 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
         "-o", jniLibsDir.get().asFile.absolutePath,
         "build",
     )
+    // Strip DWARF debug info from the Android .so (symbol tables stay, so UniFFI's
+    // library-mode bindgen and panic backtraces still work). Unstripped, the core
+    // is ~145 MB per ABI: a ~450 MB debug APK that took minutes to install and
+    // no longer fit on a default 6 GB emulator (INSTALL_FAILED_INSUFFICIENT_STORAGE).
+    // AGP's own stripDebugDebugSymbols can't help: it needs the NDK version AGP
+    // expects, which the toolchain image doesn't pin. Only this cross-build gets
+    // the override; host builds (tests, bindgen) are unaffected.
+    environment("CARGO_PROFILE_DEV_STRIP", "debuginfo")
 }
 
 val generateUniffiBindings by tasks.registering(Exec::class) {
