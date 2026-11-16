@@ -128,8 +128,9 @@ pub(crate) fn emit(level: LogLevel, target: &str, message: &str) {
     }
 }
 
-/// Emit one INFO record through the installed sink. Lets the Hello-core app
-/// prove the host log callback round-trips end to end. (M0 verification only.)
+/// Emit one INFO record through the installed sink. Lets the apps prove the
+/// host log callback round-trips end to end (both log a line at startup, which
+/// `ios/run-app.sh` asserts on).
 #[uniffi::export]
 pub fn emit_test_log(message: String) {
     emit(LogLevel::Info, "pigeon_mobile_core", &message);
@@ -138,7 +139,7 @@ pub fn emit_test_log(message: String) {
 /// The core's version string.
 ///
 /// The M0 success gate: a value computed in Rust, rendered by the native UI
-/// through the generated bindings (the Hello-core app calls this).
+/// through the generated bindings.
 #[uniffi::export]
 pub fn core_version() -> String {
     format!("pigeon-mobile-core {}", env!("CARGO_PKG_VERSION"))

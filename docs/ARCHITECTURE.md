@@ -74,8 +74,8 @@ pigeon-mobile/
 │       └── media.rs              # media upload/download/thumbnails (opaque/encrypted)
 ├── android/                      # the Android app
 │   ├── settings.gradle.kts
-│   ├── app/                      # Compose UI, view-models, navigation, DI
-│   └── core-bindings/            # generated Kotlin + bundled .so per ABI (build output)
+│   └── app/                      # Compose UI + view models; the build generates the UniFFI
+│                                 # Kotlin (build/generated/uniffi) + per-ABI .so (build/rustJniLibs)
 └── ios/                          # the iOS app (Phase M5)
     ├── PigeonMobile.xcodeproj
     └── Sources/                  # SwiftUI + generated Swift bindings + xcframework
@@ -161,10 +161,10 @@ Encryption is **transparent**: `send_message`/timeline reads route through `e2ee
 
 ## 6. The iOS app (`ios/`, Phase M5)
 
-Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI views over `ObservableObject` view models, mirroring the Android screens one-for-one (CLAUDE.md, "The UI Rule"). SwiftUI UI + Apple OS glue: Keychain (the `KeyStore` callback), `os_log` (the `LogSink`), native photo picker, and a background-refresh-aware sync lifecycle. **No protocol or crypto code in Swift** — the M5 build needed none; if any were required, the FFI boundary leaked and the fix belongs in the core (benefiting Android too). **Phase M5 is complete** (built, unit-tested, and run on an iOS simulator on a macOS host — Xcode 26.6, iOS 26.5 runtime). Four scripts drive it: `build-core.sh` (the xcframework), `run-hellocore.sh`, `run-tests.sh`, `run-app.sh` — all in the macOS `ios` CI lane.
+Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI views over `ObservableObject` view models, mirroring the Android screens one-for-one (CLAUDE.md, "The UI Rule"). SwiftUI UI + Apple OS glue: Keychain (the `KeyStore` callback), `os_log` (the `LogSink`), native photo picker, and a background-refresh-aware sync lifecycle. **No protocol or crypto code in Swift** — the M5 build needed none; if any were required, the FFI boundary leaked and the fix belongs in the core (benefiting Android too). **Phase M5 is complete** (built, unit-tested, and run on an iOS simulator on a macOS host — Xcode 26.6, iOS 26.5 runtime). Three scripts drive it: `build-core.sh` (the xcframework), `run-tests.sh`, `run-app.sh` — all in the macOS `ios` CI lane.
 
 - **M5.1 — core packaged for Swift.** The whole FFI surface generates cleanly to Swift (`uniffi-bindgen --language swift` — smoke-checked in the Linux `core` CI lane too). `ios/build-core.sh` cross-compiles the Apple targets (device arm64 + a fat arm64/x86_64 simulator slice), generates the Swift bindings, and assembles `PigeonCoreFFI.xcframework`; `ios/PigeonCore/Package.swift` exposes it as a SwiftPM dependency (`import PigeonCore`). The xcframework assembly + Apple-target compile are **macOS-gated** (need Xcode + the iOS SDK; the Linux dev container can only generate the bindings) — see `ios/README.md`.
-- **M5.2 — Hello-core smoke app.** `ios/HelloCore/` renders `coreVersion()` + `selfTestCrypto()` through the bindings and installs an `os_log` `LogSink` — the mirror of Android's M0.4, proving the Rust → xcframework → UniFFI → Swift → SwiftUI pipeline on a simulator.
+- **M5.2 — Hello-core smoke app (since removed).** `ios/HelloCore/` rendered `coreVersion()` + `selfTestCrypto()` through the bindings and installed an `os_log` `LogSink` — the mirror of Android's M0.4, proving the Rust → xcframework → UniFFI → Swift → SwiftUI pipeline on a simulator. Removed once the real app's `run-app.sh` covered the same pipeline.
 - **M5.3 — OS integration.** The real `ios/Pigeon/` app lands the Apple-side glue over the shared core, mirroring Android's `PigeonApp`: `KeychainKeyStore` (the `KeyStore` callback backed by the real Keychain), `OsLogSink`, `PhotoPicker`, and a `SyncController` (background-refresh-aware sync lifecycle, cancels the in-flight `/sync` on background — Gotcha #6), installed by `PigeonApp`. Verified by a real-Keychain unit suite on a simulator. **APNs push is BLOCKED** — no server contract (inherits M4.4).
 - **M5.4 — feature parity.** SwiftUI screens for the M1–M4 flows (auth/session, room list + create/join incl. E2EE, timeline + send/receive, media, invite, backup/restore), driven entirely by the shared core with zero protocol/crypto in Swift. Built + unit-tested (`run-tests.sh`) and launched on a simulator (`run-app.sh`).
 

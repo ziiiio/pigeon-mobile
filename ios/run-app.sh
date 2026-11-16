@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # Build the real Pigeon app (M5.4) and LAUNCH it on an iOS simulator, asserting
-# it boots into the SwiftUI UI without crashing. This is the app-level analogue
-# of `run-hellocore.sh`: `run-tests.sh` proves the app *compiles* and its unit
-# suites pass, but only actually launching it proves the SwiftUI graph
-# (RootView → AuthViewModel → the M1–M4 screens) renders on-device and the core's
-# host callbacks install at process start. The mirror of Android's emulator run.
+# it boots into the SwiftUI UI without crashing. `run-tests.sh` proves the app
+# *compiles* and its unit suites pass, but only actually launching it proves the
+# SwiftUI graph (RootView → AuthViewModel → the M1–M4 screens) renders on-device
+# and the core's host callbacks install at process start. The mirror of
+# Android's emulator run.
 #
 # What it asserts, from the app's os_log:
 #   - "PigeonApp: core callbacks installed" — the LogSink/KeyStore/store-dir
@@ -17,7 +17,7 @@
 # covered by the core's e2e suite (the iOS app drives the exact same FFI as
 # Android); this script is the iOS-specific "the app runs" gate.
 #
-# Signing: like run-tests.sh (and unlike the Hello-core smoke), we ad-hoc sign so
+# Signing: like run-tests.sh, we ad-hoc sign so
 # the Keychain entitlement is present — session restore reads the Keychain at
 # launch, which returns errSecMissingEntitlement on an unsigned build.
 #
@@ -32,7 +32,7 @@ SCHEME="Pigeon"
 BUNDLE_ID="com.pigeon.mobile"
 DERIVED="build/DerivedData"
 SUBSYSTEM="com.pigeon.mobile"
-SIM_NAME="pigeon-hellocore-sim"   # reuse the smoke-test device if present
+SIM_NAME="pigeon-sim"            # a dedicated device, created if absent
 INSTALL_MARKER="PigeonApp: core callbacks installed"
 
 if [ ! -d "PigeonCore/PigeonCoreFFI.xcframework" ]; then
@@ -40,7 +40,7 @@ if [ ! -d "PigeonCore/PigeonCoreFFI.xcframework" ]; then
   exit 1
 fi
 
-# ── Pick/create a simulator (same logic as run-hellocore.sh / run-tests.sh) ───
+# ── Pick/create a simulator (same logic as run-tests.sh) ─────────────────────
 echo "==> Selecting a simulator"
 sim_udid="$(xcrun simctl list devices --json \
   | /usr/bin/python3 -c 'import json,sys
@@ -51,16 +51,23 @@ for rt,devs in d.items():
             print(x["udid"]); sys.exit(0)')" || true
 
 if [ -z "${sim_udid:-}" ]; then
-  runtime="$(xcrun simctl list runtimes --json \
+  # Newest iOS runtime that supports a plain-numbered iPhone ("iPhone 17"), paired
+  # with the newest such iPhone *that runtime* supports. Some runtimes are
+  # device-specific (e.g. one that only supports a single model), so the runtime
+  # and device type must be chosen together or `simctl create` fails with
+  # "Incompatible device".
+  read -r runtime devtype < <(xcrun simctl list runtimes --json \
     | /usr/bin/python3 -c 'import json,sys
-r=[x for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and "iOS" in x["name"]]
-print(sorted(r,key=lambda x:x["version"])[-1]["identifier"] if r else "")')"
-  [ -n "$runtime" ] || { echo "error: no available iOS simulator runtime" >&2; exit 1; }
-  devtype="$(xcrun simctl list devicetypes --json \
-    | /usr/bin/python3 -c 'import json,sys
-t=[x for x in json.load(sys.stdin)["devicetypes"] if x["name"].startswith("iPhone")]
-plain=[x for x in t if x["name"].replace("iPhone","").strip().isdigit()]
-print((sorted(plain,key=lambda x:int(x["name"].split()[-1]))[-1] if plain else t[-1])["identifier"])')"
+def ver(r): return tuple(int(p) for p in r["version"].split("."))
+def num(t):
+    n=t["name"].replace("iPhone","").strip()
+    return int(n) if n.isdigit() else None
+rs=[r for r in json.load(sys.stdin)["runtimes"] if r.get("isAvailable") and r["name"].startswith("iOS")]
+for r in sorted(rs,key=ver,reverse=True):
+    ts=[t for t in r.get("supportedDeviceTypes",[]) if num(t) is not None]
+    if ts:
+        print(r["identifier"], max(ts,key=num)["identifier"]); break') || true
+  [ -n "${runtime:-}" ] || { echo "error: no iOS simulator runtime with a supported iPhone" >&2; exit 1; }
   sim_udid="$(xcrun simctl create "$SIM_NAME" "$devtype" "$runtime")"
 fi
 echo "    using simulator $sim_udid"

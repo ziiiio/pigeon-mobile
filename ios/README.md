@@ -48,23 +48,11 @@ run the script before opening the app.
 
 ## Next (M5.2 → M5.4, macOS-gated)
 
-- ✅ **M5.2 — Hello-core smoke app (built + run on a simulator).** A SwiftUI app
-  ([`HelloCore/`](HelloCore/)) calling `coreVersion()` / `selfTestCrypto()` — the
-  mirror of Android's M0.4 — proving the bindings load and run on-device. It is
-  packaged by a checked-in Xcode project ([`HelloCore.xcodeproj`](HelloCore.xcodeproj),
-  hand-written so no `xcodegen`/`tuist` is needed) consuming the local `PigeonCore`
-  Swift package. **To build + run it (macOS):**
-
-  ```sh
-  ios/build-core.sh        # produce the xcframework + Swift bindings first
-  ios/run-hellocore.sh     # build the app, boot a simulator, run + assert
-  ```
-
-  `run-hellocore.sh` boots a simulator, installs, launches, and asserts from the
-  app's `os_log` output that the `LogSink` round-trips and both Rust-computed
-  values returned through the bindings. It backs the **macOS CI lane**. Verified
-  green on an `iPhone 16` simulator (iOS 18.4). Still **not runnable in the Linux
-  dev container** (no simulator) — that only generates the bindings.
+- ✅ **M5.2 — Hello-core smoke app (since removed).** A throwaway SwiftUI app
+  calling `coreVersion()` / `selfTestCrypto()` — the mirror of Android's M0.4 —
+  proved the bindings load and run on a simulator. It was deleted (with its Xcode
+  project and `run-hellocore.sh`) once the real app's `run-app.sh` covered the
+  same pipeline.
 - ✅ **M5.3 — Apple OS integration (built + tested).** The real `Pigeon` app
   ([`Pigeon/`](Pigeon/), [`Pigeon.xcodeproj`](Pigeon.xcodeproj)) lands the
   OS-integration layer over the shared core: `KeychainKeyStore` (the `KeyStore`
