@@ -457,8 +457,21 @@ platform — treat it like a public API.
 
 ## Part 5 — The Android layer
 
-The native side owns UI, OS integration, and a *thin* view-model. Nothing more. Read these
-five files:
+The native side owns UI, OS integration, and a *thin* view-model. Nothing more.
+
+**The shape of every screen is MVVM** (CLAUDE.md, "The UI Rule"). Think of it as a loop that
+only turns one way: the screen *reads* a single state object from its view model
+(`RoomsState`), a tap *calls* a view-model method (`vm.joinRoom(id)`), the view model calls
+the core and *replaces* the state, and Compose/SwiftUI redraws. The screen never calls the
+core and never turns an exception into text; the view model does that with a typed mapper
+(`chatErrorMessage`, `authErrorMessage`…). Short-lived visual state, such as whether a dialog
+is open or what's typed in a field, stays in the screen. Why not MVC? Compose and SwiftUI
+already redraw from state, so a controller that updates views by hand has nothing to do and
+tends to grow into one class that does everything. Every rule applies to both apps, which
+mirror each other screen for screen. The one exception is the sync loop: the signed-in
+screen starts it, so leaving the screen cancels it (Gotcha #6).
+
+Read these five files:
 
 **`PigeonApp.kt`** (an `Application`) installs the core's two host callbacks **exactly
 once, at process start** — the `LogcatSink` and the `AndroidKeyStore`. Everything

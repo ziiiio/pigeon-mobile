@@ -21,6 +21,48 @@ This is the project's reason for existing. Before writing *any* logic on the nat
 
 The native side is allowed to own: **UI, navigation, OS integration** (notifications/FCM, photo picker, sharing, biometric prompts, foreground services), and **a thin view-model layer** that calls the core and renders what it returns. If you find yourself parsing a Pigeon event, doing crypto, or constructing a federation/client API request body in Kotlin or Swift, **stop** — that logic belongs in `pigeon-mobile-core`.
 
+## The UI Rule: MVVM with one-way data flow, the same on both platforms
+
+The Cardinal Rule above decides *what* the native side may do; this one decides *how* its
+UI is structured. Both apps use **MVVM** (Model-View-ViewModel), not MVC: Compose and
+SwiftUI redraw a screen from state, so there is no view for a controller to poke.
+
+| Layer | Is | Owns |
+|---|---|---|
+| **Model** | the Rust core (`PigeonClient`, its store, the sync loop) | all protocol, crypto and storage logic |
+| **ViewModel** | `*ViewModel.kt` / `*ViewModel.swift`, one per screen | calling the core, and the screen's state |
+| **View** | Compose `*Screen.kt` / SwiftUI `*View.swift` | drawing state, forwarding user actions |
+
+1. **Data flows one way.** A view reads one state object (`RoomsState`, `ChatState`,
+   `AuthState`), exposed read-only (`StateFlow` / `@Published private(set)`). A user action
+   calls a view-model method; the view model calls the core and replaces the state; the view
+   redraws. Views never call the core, and never mutate view-model state.
+2. **Where state lives.** Anything that comes from or goes to the core, or must survive a
+   rotation or a re-render, is in the view model's state object. Purely visual, short-lived
+   state stays in the view: whether a dialog/menu/sheet is open, a text field's draft, a
+   thumbnail being drawn. Don't plumb those through the view model.
+3. **The view model maps errors; the view never formats them.** Errors become user-facing
+   text inside the view model through a typed mapper that branches on `CoreError`/`ErrorCode`
+   — never on error text, and never `e.message` / `localizedDescription` / raw exceptions.
+   Pick the mapper by context: `authErrorMessage` (sign-in, session), `chatErrorMessage` (room
+   and chat actions), `backupErrorMessage` / `restoreErrorMessage` (keys).
+4. **User-facing wording lives in pure top-level functions** next to the view model
+   (`chatErrorMessage`, `lastBackupText`, `restoreSuccessMessage`, `mergeTimeline`…), so it is
+   unit-tested without a screen or a core.
+5. **Android and iOS are kept in lockstep.** Same screens, same state fields, same view-model
+   method names, same wording. A change to one platform's view model, state or message lands
+   on the other in the same commit, with the same tests (`*Test.kt` ↔ `*Tests.swift`). Mark
+   mirrored code with a `Mirrors Android's/iOS ...` comment.
+6. **The one sanctioned exception: the sync loop.** It is started by the signed-in screen
+   (`RoomListRoute`'s `LaunchedEffect` / iOS `SyncController`), not the view model, so that the
+   screen's lifetime bounds it and leaving the screen cancels the in-flight `/sync` (Gotcha
+   #6). Its signals go straight back into the view model (`reload`, `setConnected`,
+   `onSyncFailed`).
+
+If a view model starts parsing events, building request bodies or holding secrets, the logic
+belongs in the core (the Cardinal Rule). If a view starts calling the core or formatting
+errors, it belongs in the view model.
+
 ## The Completeness Rule: no deferred work — if it can be done now, do it now
 
 **Do not defer work you could finish now.** If a piece of a feature is implementable with what already exists — the dependency is present, the wire contract is known, the foundation it needs is built — implement it, completely, in the same change. Do not split doable work into a "later" bucket, leave it as a bare `TODO`, or label it "deferred"/"M-later" to shrink a diff. A stage is done when its endpoints, its error paths, and its tests are all in — not when the happy path compiles.
