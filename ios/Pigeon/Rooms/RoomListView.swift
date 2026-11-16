@@ -214,7 +214,7 @@ struct RoomListView: View {
                 Task { @MainActor in vm?.setConnected(connected) }
             })
         sync.setClient(client, observer: observer, onEnded: { [weak vm] err in
-            Task { @MainActor in vm?.onSyncFailed(authErrorMessage(err)) }
+            Task { @MainActor in vm?.onSyncFailed(err) }
         })
         sync.setActive(scenePhase == .active)
     }

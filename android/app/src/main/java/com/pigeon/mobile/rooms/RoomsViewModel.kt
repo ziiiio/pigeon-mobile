@@ -1,5 +1,6 @@
 package com.pigeon.mobile.rooms
 
+import com.pigeon.mobile.auth.authErrorMessage
 import uniffi.pigeon_mobile_core.ErrorCode
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -63,7 +64,7 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
                 val rooms = withContext(Dispatchers.IO) { client.listRooms() }
                 _state.value.copy(rooms = rooms, loading = false)
             } catch (e: CoreException) {
-                _state.value.copy(loading = false, actionError = e.message)
+                _state.value.copy(loading = false, actionError = chatErrorMessage(e))
             }
         }
     }
@@ -90,7 +91,7 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
                     client.createRoom(n, t)
                 }
             } catch (e: CoreException) {
-                _state.value = _state.value.copy(actionError = e.message)
+                _state.value = _state.value.copy(actionError = chatErrorMessage(e))
             }
         }
     }
@@ -101,14 +102,16 @@ class RoomsViewModel(private val client: PigeonClient) : ViewModel() {
             try {
                 client.joinRoom(roomId.trim())
             } catch (e: CoreException) {
-                _state.value = _state.value.copy(actionError = e.message)
+                _state.value = _state.value.copy(actionError = chatErrorMessage(e))
             }
         }
     }
 
-    /** The sync loop ended fatally (e.g. the token was revoked). */
-    fun onSyncFailed(message: String?) {
-        _state.value = _state.value.copy(connected = false, actionError = message)
+    /** The sync loop ended fatally (e.g. the token was revoked). Mapped with the
+     * sign-in wording on purpose: the fatal cases are session ones ("your session
+     * has expired"). */
+    fun onSyncFailed(e: CoreException) {
+        _state.value = _state.value.copy(connected = false, actionError = authErrorMessage(e))
     }
 
     /**

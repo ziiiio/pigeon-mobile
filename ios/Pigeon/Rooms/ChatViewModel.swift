@@ -119,7 +119,6 @@ final class ChatViewModel: ObservableObject {
         try? await client.downloadImage(image: image)
     }
 
-    /// Union two pages by event id and order by the opaque cursor (DAG depth).
 }
 
 /// Merge a freshly-read page into what's on screen, by event id, ordered by
@@ -134,8 +133,8 @@ func mergeTimeline(existing: [TimelineEvent], fresh: [TimelineEvent]) -> [Timeli
         .sorted { $0.cursor < $1.cursor }
 }
 
-/// The user-facing message for a failed chat action (send / invite / attach /
-/// timeline read). Branches on the typed `P_` code, never on error text, and
+/// The user-facing message for a failed room or chat action (create / join /
+/// room-list read / send / invite / attach / timeline read). Branches on the typed `P_` code, never on error text, and
 /// never shows the raw error. Reuses `authErrorMessage` except where its sign-in
 /// wording would mislead in a chat: a malformed invitee id comes back as
 /// `.invalidUsername` ("Usernames may use only…") and a refused action as

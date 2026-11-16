@@ -57,10 +57,12 @@ final class RoomsViewModel: ObservableObject {
     /// Fold the sync loop's connectivity signal into state.
     func setConnected(_ connected: Bool) { state.connected = connected }
 
-    /// The sync loop ended fatally (e.g. the token was revoked).
-    func onSyncFailed(_ message: String?) {
+    /// The sync loop ended fatally (e.g. the token was revoked). Mapped with the
+    /// sign-in wording on purpose: the fatal cases are session ones ("your
+    /// session has expired"). Mirrors Android's `onSyncFailed`.
+    func onSyncFailed(_ error: Error) {
         state.connected = false
-        state.actionError = message
+        state.actionError = authErrorMessage(error)
     }
 
     /// Create a room; its state arrives via the sync loop (which reloads the
@@ -139,7 +141,9 @@ final class RoomsViewModel: ObservableObject {
     func clearError() { state.actionError = nil }
     func clearNotice() { state.notice = nil }
 
-    private func message(_ error: Error) -> String { authErrorMessage(error) }
+    /// Room-list actions (reload / create / join) use the chat wording, not the
+    /// sign-in one: a refused join must not read "Incorrect username or password".
+    private func message(_ error: Error) -> String { chatErrorMessage(error) }
 }
 
 extension String {

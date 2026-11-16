@@ -172,7 +172,6 @@ class ChatViewModel(
             null
         }
 
-    /** Union two pages by event id and order by the opaque cursor (DAG depth). */
 }
 
 /**
@@ -186,8 +185,8 @@ internal fun mergeTimeline(existing: List<TimelineEvent>, fresh: List<TimelineEv
     (fresh + existing).distinctBy { it.eventId }.sortedBy { it.cursor }
 
 /**
- * The user-facing message for a failed chat action (send / invite / attach /
- * timeline read). Branches on the typed `P_` code, never on error text
+ * The user-facing message for a failed room or chat action (create / join /
+ * room-list read / send / invite / attach / timeline read). Branches on the typed `P_` code, never on error text
  * (CLAUDE.md), and never shows the raw exception. Reuses [authErrorMessage] except
  * where its sign-in wording would mislead in a chat: a malformed invitee id comes
  * back as `InvalidUsername` ("Usernames may use only…"), and a refused action as

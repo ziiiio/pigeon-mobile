@@ -110,7 +110,7 @@ fun RoomListRoute(
         } catch (e: CoreException) {
             // Fatal (e.g. revoked token) — the loop ended. Surface it; a full
             // "kick to sign-in" is refined alongside membership handling in M2.6.
-            vm.onSyncFailed(e.message)
+            vm.onSyncFailed(e)
         }
     }
 
