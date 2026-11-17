@@ -88,7 +88,11 @@ deletes the MLS state: the next sign-in is a new device.
 The core is offline-first. Reads come from the local store, and the network catches up.
 
 - **Sync loop.** `run_sync` long-polls `/sync` while the signed-in screen is open, and
-  leaving the screen cancels it (Gotcha #6). Transient errors back off from 1 s to 30 s and
+  leaving the screen cancels it (Gotcha #6). The server answers a parked poll as soon as
+  something arrives **for this user** (a message in one of their rooms, a membership change
+  naming them, a to-device message), whether it was written locally or came from another
+  server. Before server commit `b3ba1dd` (2026-11-18), messages from users on other
+  servers waited out the full `SYNC_TIMEOUT_MS` poll. Transient errors back off from 1 s to 30 s and
   retry: network failures and **`429 P_LIMIT_EXCEEDED`** both count as transient. Only a
   fatal error (such as a revoked token) ends the loop. The room list then shows
   "offline" with a session error, and the user signs in again.
