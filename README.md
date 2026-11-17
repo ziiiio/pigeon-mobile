@@ -36,7 +36,7 @@ The client must do MLS (RFC 9420) encryption **on-device**, and private keys mus
 core/        # pigeon-mobile-core — the shared Rust crate (UniFFI); reuses pigeon-crypto + pigeon-core
 android/     # the Android app (Gradle, Kotlin, Jetpack Compose)
 ios/         # the iOS app (Swift, SwiftUI; the same core packaged as an xcframework)
-docs/        # ARCHITECTURE.md, CODEBASE_GUIDE.md
+docs/        # architecture, codebase guide, operations, local testing, security register, benchmarks
 CLAUDE.md    # rulebook for contributors / AI assistants
 ROADMAP.md   # the phase plan
 ```
@@ -88,11 +88,15 @@ Then point the app at that server's address on first launch. The reference CLI i
 - [`ROADMAP.md`](ROADMAP.md) — the full phased plan and success criteria.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the structural map: core modules, the FFI surface, the build pipeline, end-to-end flows.
 - [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md) — a narrated, junior-developer walk through the actual code (start here to onboard).
+- [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md) — every test lane (core, e2e, Android, iOS) and its exact commands.
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — what the apps keep on a device, network behaviour, logs, CI, and release gaps.
+- [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md) — the security register: fixed findings, open gaps, accepted weaknesses, ignored advisories.
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — binary-size and test/build-time baselines.
 - [`../pigeon`](../pigeon) — the homeserver and the **authoritative protocol source**.
 
 ## Security
 
-End-to-end encrypted rooms are encrypted on-device via MLS; the homeserver (and every server in the federation) sees only ciphertext. Private keys never leave the device and live inside the Rust core, protected at rest by the platform keystore. Plaintext, tokens, and keys must never appear in logs, metrics, or crash/analytics reports. See [`CLAUDE.md`](CLAUDE.md) gotchas for the full list.
+End-to-end encrypted rooms are encrypted on-device via MLS; the homeserver (and every server in the federation) sees only ciphertext. Private keys never leave the device and live inside the Rust core, protected at rest by the platform keystore. Plaintext, tokens, and keys must never appear in logs, metrics, or crash/analytics reports. See [`CLAUDE.md`](CLAUDE.md) gotchas for the full list, and [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md) for findings and open gaps.
 
 ## License
 

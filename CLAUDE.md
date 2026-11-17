@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file orients Claude (and other AI coding assistants) on the **Pigeon mobile client**. Read it before making non-trivial changes. The companion docs are [`ROADMAP.md`](ROADMAP.md) (the plan), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the structural map), and [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md) (a narrated, junior-dev walk through the code).
+This file orients Claude (and other AI coding assistants) on the **Pigeon mobile client**. Read it before making non-trivial changes. The companion docs are [`ROADMAP.md`](ROADMAP.md) (the plan), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the structural map), [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md) (a narrated, junior-dev walk through the code), [`docs/OPERATIONS.md`](docs/OPERATIONS.md) (on-device data, behaviour, logs, CI, release gaps), [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md) (the test lanes), [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md) (the security register) and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) (size and timing baselines). The "Documentation Sync Rule" below says when each must change.
 
 ## Project Summary
 
@@ -120,8 +120,8 @@ android/                  # the Android app (Gradle, Kotlin, Jetpack Compose)
   app/                    # the one Gradle module; the build generates the UniFFI Kotlin
                           # (build/generated/uniffi) and the per-ABI .so (build/rustJniLibs)
 ios/                      # the iOS app (Phase M5; Swift, SwiftUI, xcframework)
-docs/
-  ARCHITECTURE.md
+docs/                     # ARCHITECTURE, CODEBASE_GUIDE, OPERATIONS, LOCAL_TESTING,
+                          # SECURITY_REVIEW, BENCHMARKS (see the Documentation Sync Rule)
 ```
 
 `core/` is the heart. Keep it free of platform assumptions — no Android/iOS APIs, no `android_logger` in the public path (use a UniFFI callback for logging so the host owns the sink). It must build and unit-test on the host (`cargo test`) with no device.
@@ -315,21 +315,28 @@ Stick to these unless you have a specific reason and have discussed it.
 **Commit after each completed step — don't batch.** A "step" is a ROADMAP stage or substage (e.g. `M2.1`, `M2.2`), or a self-contained unit of work the user asked for. When one is done, commit it before starting the next. Do **not** let several stages pile up in the working tree as one mega-diff.
 
 - **One commit per step, and it is complete:** the code, its tests, and the doc updates the change requires (the Documentation Sync Rule) land **together** in that single commit. A commit that leaves a doc contradicting the code, or tests unwritten, is not a finished step.
-- **Green before commit.** Only commit a step once its gate passes — `cargo test` + `cargo clippy -D warnings` + `cargo fmt --check` for core changes, plus `assembleDebug` when the FFI surface or Android side changed. Never commit a red build.
+- **Green before commit.** Only commit a step once its gate passes — `cargo test` + `cargo clippy -D warnings` + `cargo fmt --check` for core changes, plus `assembleDebug` when the FFI surface or Android side changed (and `cargo deny check` when dependencies changed). The commands for every lane are in [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md). Never commit a red build.
 - **Message convention:** match the existing history — a `M<phase>.<step>:` (or `build(...)`/`docs:`/`dev:`) prefix and a one-line summary of what the step delivered, mirroring commits like `M1.5: logout & token invalidation — closes M1`. End the message with the `Co-Authored-By` trailer the harness specifies.
 - **Commit, not push.** This rule authorizes committing after each step without re-asking. Pushing still waits for an explicit request. This repo's history is linear on `main` (each M-step committed directly, then pushed on request) — follow that convention; don't spin up a branch per step.
 - Unrelated pre-existing cruft in the tree (e.g. stray build artifacts) is **not** part of a step's commit — stage only the files the step actually changed.
 
 ## Documentation Sync Rule
 
-This project keeps **three** docs, each with one job. A change that lands code a doc now contradicts is incomplete — update the relevant doc(s) **in the same commit**, keep each fact in one canonical place, and cross-reference rather than copy.
+This project keeps **eight** docs, each with one job. They mirror the homeserver's `docs/` set, adapted to a mobile client. A change that lands code a doc now contradicts is incomplete. Update the relevant doc(s) **in the same commit**, keep each fact in one canonical place, and cross-reference rather than copy (duplicated content drifts). A pure internal refactor that changes none of the things below needs no doc change.
 
-- [`README.md`](README.md) *(add when the app is runnable)* — the front door: what it is, what works today, how to build & run, supported platforms.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the structural map: the core's FFI surface, modules, the native layer's shape, the build/codegen pipeline, end-to-end flows. Update when a module, FFI type, store, screen-to-core flow, or build step is added/removed/renamed.
-- [`ROADMAP.md`](ROADMAP.md) — the plan: phases, stage breakdowns, success criteria. Update when scope, ordering, or a stage's status changes.
-- `CLAUDE.md` (this file) — the rulebook: conventions, gotchas, decisions, the current-phase guard. Update when a convention/gotcha/decision changes or the active phase moves.
+- [`README.md`](README.md): **the front door**: what it is, what works today, how to build and run, supported platforms. Keep it short. Depth belongs in the docs below. Update it when shipped behaviour or status changes.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): **the structural map**: the core's FFI surface, modules, the native layer's shape, the build/codegen pipeline, end-to-end flows. Update it when a module, FFI type, store, screen-to-core flow, or build step is added, removed or renamed.
+- [`docs/CODEBASE_GUIDE.md`](docs/CODEBASE_GUIDE.md): **the tutorial for a newcomer** reading top to bottom. When a change adds or alters a concept a newcomer must understand, *teach* it in the matching Part (core module → Part 3, FFI → Part 4, Android → Part 5, build → Part 6, flows → Part 7, gotchas → Part 9, status → Appendix A, terms → Appendix B). Explain; don't restate ARCHITECTURE.md.
+- [`ROADMAP.md`](ROADMAP.md): **the plan**: phases, stage breakdowns, success criteria. Update it when scope, ordering, or a stage's status changes.
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md): **the operator guide**: app ids and versions, the pre-filled homeserver URLs, the core's tunable constants (sync timeout/limit/backoff, KeyPackage count, media cap), what lives on the device and where (store file, keystore entry names), store schema version and migrations, network/offline behaviour, log tags and how to read them, the CI jobs and secrets, and release readiness. Update it when any of those change: a constant's value, a keystore key or store file name, a schema version bump, a log target, a CI job, or a release gap closed.
+- [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md): **the test runbook**: every test lane (core, `e2e/`, Android build + JVM tests + emulator, the iOS scripts), what each proves, and the exact commands. It names concrete things that drift silently: script names, the `pigeon-sim` simulator, the AVD, test file names, container service names. Update it when any of those change. Every command in it should have been run, not assumed. Hands-on testing against a live server stays in the server repo's runbook (below); link to it, don't copy it.
+- [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md): **the security register**: dated findings and their fixes (with commit and test), what was checked clean, the **Open** gaps, the **Accepted** weaknesses (with rationale), and every **`cargo-deny` advisory ignored** in `core/deny.toml`. Treat it as a register: **add** findings with date and test, keep the living sections true, never rewrite a dated finding. Update it when you fix or introduce security-relevant behaviour (key/token handling, the plaintext-downgrade guard, what reaches logs, backup/at-rest storage, TLS/cleartext, clipboard handling of secrets), when an Open item is fixed or a Clean claim stops holding, and **whenever `core/deny.toml` changes**.
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md): **size and performance baselines**: per-ABI `.so` and APK sizes, the iOS artifacts, test-suite and build wall-clock, with the commands to reproduce them. Add a new dated baseline (don't overwrite the old one) after a dependency bump, a build-profile or strip change, or anything likely to grow the core.
+- `CLAUDE.md` (this file): **the rulebook**: conventions, gotchas, decisions, the current-phase guard. Update it when a convention, gotcha or decision changes or the active phase moves.
 
-**Cross-repo runbook.** The hands-on guide to running these apps against a local homeserver — simulator/emulator setup, testing a conversation, wiping app data, backup/restore — lives in the server repo at [`../pigeon/docs/LOCAL_TESTING.md`](../pigeon/docs/LOCAL_TESTING.md), and it walks through this app's screens by name. When a change here alters what it describes — a **menu label**, a **pre-filled homeserver URL**, the join/invite/backup/restore **flow**, the bundle/package ids, or the iOS/Android build scripts — update that file too (it's a separate commit, in the other repo).
+**Cross-repo runbook.** The hands-on guide to running these apps against a local homeserver (simulator/emulator setup, testing a conversation, wiping app data, backup/restore) lives in the server repo at [`../pigeon/docs/LOCAL_TESTING.md`](../pigeon/docs/LOCAL_TESTING.md), and it walks through this app's screens by name. When a change here alters what it describes (a **menu label**, a **pre-filled homeserver URL**, the join/invite/backup/restore **flow**, the bundle/package ids, the simulator name, or the iOS/Android build scripts), update that file too. It's a separate commit, in the other repo. The two `LOCAL_TESTING.md` files split the job: this repo's covers the test lanes, the server's covers the live full-stack walkthrough.
+
+**Mirrored server docs.** `OPERATIONS.md`, `SECURITY_REVIEW.md` and `BENCHMARKS.md` each have a server counterpart in `../pigeon/docs/`. When the server changes something the client inherits (a rate limit, an accepted advisory in the shared crypto stack, a wire behaviour), update the mobile doc's matching entry too, and cite the server commit.
 
 ## References
 

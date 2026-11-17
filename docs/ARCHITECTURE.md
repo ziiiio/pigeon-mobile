@@ -55,7 +55,12 @@ pigeon-mobile/
 ├── ROADMAP.md                    # plan
 ├── README.md                     # front door (added when runnable)
 ├── docs/
-│   └── ARCHITECTURE.md           # this file
+│   ├── ARCHITECTURE.md           # this file
+│   ├── CODEBASE_GUIDE.md         # the narrated walkthrough
+│   ├── OPERATIONS.md             # on-device data, behaviour, logs, CI, release gaps
+│   ├── LOCAL_TESTING.md          # the test lanes
+│   ├── SECURITY_REVIEW.md        # the security register
+│   └── BENCHMARKS.md             # size & timing baselines
 ├── core/                         # pigeon-mobile-core — the shared Rust crate
 │   ├── Cargo.toml                # crate-type = ["cdylib","staticlib"]; deps incl. pigeon-crypto, pigeon-core
 │   ├── pigeon_mobile_core.udl    # UniFFI interface (or proc-macro attrs in lib.rs)

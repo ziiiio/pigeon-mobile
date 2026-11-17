@@ -81,6 +81,9 @@ Pigeon homeserver   /_pigeon/client/v1/*
 
 Before reading code, build it and watch tests pass. Concrete feedback beats theory.
 
+This Part gets you started. The full, maintained list of test lanes and their exact
+commands (including iOS) is [`LOCAL_TESTING.md`](LOCAL_TESTING.md).
+
 **Prerequisite:** the homeserver repo must be checked out as a *sibling directory*
 (`../pigeon`) — the core depends on its `pigeon-core` and `pigeon-crypto` crates *by
 path* (see `core/Cargo.toml`).
@@ -689,7 +692,8 @@ diagrammed in `ARCHITECTURE.md` §8, driving the same core FFI.
 
 ## Part 8 — Testing (three layers)
 
-Match the test to what you changed. From fastest/cheapest to most thorough:
+Match the test to what you changed. From fastest/cheapest to most thorough (commands for
+every lane, including iOS, are in [`LOCAL_TESTING.md`](LOCAL_TESTING.md)):
 
 1. **Rust unit tests** (`#[cfg(test)]` in `api.rs`, `lib.rs`) — pure functions:
    error-code round-trips, `parse_auth`/`parse_error`, the log-sink callback. No runtime,
