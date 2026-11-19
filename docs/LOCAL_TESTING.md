@@ -111,6 +111,13 @@ $SDK/platform-tools/adb shell am start -n com.pigeon.mobile/.MainActivity
 $SDK/platform-tools/adb logcat | grep pigeon/            # the core's log lines
 ```
 
+**`INSTALL_FAILED_UPDATE_INCOMPATIBLE` (signatures do not match)** means the APK was signed
+with a different debug key than the installed app. The key is `/root/.android/debug.keystore`
+in the container, kept in the `android-home` volume since 2026-11-19; before that, every
+container recreation minted a new one. Once the key has changed the only way forward is
+`adb uninstall com.pigeon.mobile`, which **wipes the app's data on the emulator** (session
+and MLS keys): restore from a key backup afterwards (`../pigeon/docs/LOCAL_TESTING.md` §6).
+
 The app should open on "Sign in to Pigeon" with `http://10.0.2.2:8008` filled in, and
 logcat should show `pigeon/pigeon_mobile_core: PigeonApp: core callbacks installed`. If you
 sign in and land on a bare "Signed in as …" screen, the APK is stale. Rebuild it.

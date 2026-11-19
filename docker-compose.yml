@@ -53,6 +53,10 @@ services:
       # Separate target volume: amd64 artifacts must not mix with the arm64 dev's.
       - core-target-amd64:/workspace/pigeon-mobile/core/target
       - gradle-cache:/root/.gradle
+      # The debug signing key (debug.keystore) lives here. Without a volume each
+      # container recreation minted a new key, and the emulator then refused the
+      # next build as an update (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+      - android-home:/root/.android
     command: sleep infinity
 
 volumes:
@@ -60,3 +64,4 @@ volumes:
   core-target:
   core-target-amd64:
   gradle-cache:
+  android-home:
