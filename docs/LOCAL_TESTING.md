@@ -126,9 +126,12 @@ ios/run-app.sh         # build, install and launch it; assert it boots and stays
 - `build-core.sh` builds the core in release mode for device arm64 and a fat
   arm64/x86_64 simulator slice, then generates the Swift bindings. Both outputs are
   git-ignored.
-- `run-tests.sh` runs `PigeonTests`: the real-Keychain `KeychainKeyStoreTests` and
-  `AuthErrorTests`. It ad-hoc signs the app so the Keychain entitlement is present. Android's
-  `ChatErrorTest`, `BackupFeedbackTest` and `TimelineMergeTest` have no iOS mirror yet.
+- `run-tests.sh` runs `PigeonTests` (28 tests): the real-Keychain `KeychainKeyStoreTests`,
+  plus `AuthErrorTests`, `ChatErrorTests`, `BackupFeedbackTests` and `TimelineMergeTests`.
+  The last three mirror Android's `ChatErrorTest`, `BackupFeedbackTest` and
+  `TimelineMergeTest` case for case (each file says so in its header), so a wording or
+  behaviour change that lands on one platform only fails on the other. It ad-hoc signs the
+  app so the Keychain entitlement is present.
 - `run-app.sh` launches the app and checks the unified log for
   `PigeonApp: core callbacks installed`, then confirms the process is still alive a few
   seconds later.
