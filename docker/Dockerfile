@@ -41,8 +41,12 @@ RUN install -d /etc/apt/keyrings \
        > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends temurin-25-jdk \
-    && rm -rf /var/lib/apt/lists/*
-ENV JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s "/usr/lib/jvm/temurin-25-jdk-$(dpkg --print-architecture)" /usr/lib/jvm/temurin-25
+# Arch-neutral: the package installs to temurin-25-jdk-<amd64|arm64>, and the
+# `android` service is amd64 while `dev` is native (arm64 on Apple Silicon). A
+# hard-coded -amd64 path broke sdkmanager in the dev image.
+ENV JAVA_HOME=/usr/lib/jvm/temurin-25
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Lint/format components (CI gates on `cargo fmt --check` + `cargo clippy`).
