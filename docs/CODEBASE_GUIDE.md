@@ -611,28 +611,37 @@ location rather than ever splitting a database from its write-ahead log.
 
 ## Part 6 — The build pipeline
 
-`./gradlew assembleDebug` is one command that does four things, wired in
-`android/app/build.gradle.kts`:
+`./gradlew assembleDebug` (or `assembleRelease`) is one command that does four things,
+wired in `android/app/build.gradle.kts`:
 
 ```
-1. cargoNdkBuild          cargo-ndk cross-compiles the core → libpigeon_mobile_core.so
-   (Exec task)            for arm64-v8a + x86_64, debug info stripped (see below)
+1. cargoNdkBuild<Type>    cargo-ndk cross-compiles the core → libpigeon_mobile_core.so
+   (Exec task)            for arm64-v8a + x86_64, into build/rustJniLibs/<type>:
+                          Debug = dev profile, Release = --release; both DWARF-stripped
         │
-2. generateUniffiBindings runs the uniffi-bindgen bin against the built .so
+2. generateUniffiBindings<Type>  runs the uniffi-bindgen bin against *that* .so
    (Exec task)            → uniffi/pigeon_mobile_core/pigeon_mobile_core.kt
-        │  (both hooked into preBuild)
+        │  (both hooked into pre<Type>Build)
 3. Kotlin/Java compile    the generated bindings are added to the Kotlin sources via the
                           AGP Variant API (variant.sources.kotlin); the .so via jniLibs
         │
-4. package                → app-debug.apk, bundling the .so per ABI
+4. package                → app-debug.apk / app-release-unsigned.apk, bundling that
+                          build type's .so per ABI (sourceSets[<type>].jniLibs)
 ```
+
+*Why one task pair per build type.* A single `cargoNdkBuild` used to run the dev profile
+for everything, so a release APK would have shipped the unoptimized debug core (about twice
+the size). Each build type now has its own cargo profile and output directory. The bindings
+come from the same build type's library so a release build never also compiles the debug
+core; they're identical either way (read from the same exported metadata), so both write
+the one shared generated-sources directory.
 
 **The toolchain (pinned in `android/`):** Gradle **9.6.1** (wrapper), AGP **9.2.1**, Kotlin
 **2.2.10**, `compileSdk`/`targetSdk` **36**, `minSdk` **24**, NDK **r28c** on the host.
 
 **Why the cross-build strips debug info.** A debug Rust `.so` carries full DWARF: ~145 MB
 per ABI, a ~450 MB APK that took minutes to install and stopped fitting on a default 6 GB
-emulator (`INSTALL_FAILED_INSUFFICIENT_STORAGE`). `cargoNdkBuild` sets
+emulator (`INSTALL_FAILED_INSUFFICIENT_STORAGE`). `cargoNdkBuildDebug` sets
 `CARGO_PROFILE_DEV_STRIP=debuginfo` (~29 MB per ABI, ~68 MB APK). Symbol tables survive, so
 UniFFI's library-mode bindgen and panic backtraces are unaffected; host builds (tests,
 bindgen) don't get the override. AGP's own `stripDebugDebugSymbols` then strips the copy it

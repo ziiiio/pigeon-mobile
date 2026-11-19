@@ -8,45 +8,76 @@ plugins {
 }
 
 // --- Rust core integration (M0.3 cross-compile + M0.5 build glue) ------------
-// `./gradlew assembleDebug` cross-compiles the Rust core with cargo-ndk, then
-// regenerates the UniFFI Kotlin bindings — so the app build is one command.
+// `./gradlew assemble<BuildType>` cross-compiles the Rust core with cargo-ndk for
+// that build type, then regenerates the UniFFI Kotlin bindings, so the app build
+// is one command. Debug and release each get their own cargo profile and output
+// directory, so a release APK packages an optimized core (Gotcha #10), not the
+// debug one, and a debug build stays exactly as fast as before.
 val coreDir = rootProject.file("../core")
-val jniLibsDir = layout.buildDirectory.dir("rustJniLibs")
 val uniffiDir = layout.buildDirectory.dir("generated/uniffi")
 
-val cargoNdkBuild by tasks.registering(Exec::class) {
-    description = "Cross-compiles pigeon-mobile-core for the target Android ABIs."
-    workingDir = coreDir
-    commandLine(
-        "cargo", "ndk",
-        "-t", "arm64-v8a",
-        "-t", "x86_64",
-        "-o", jniLibsDir.get().asFile.absolutePath,
-        "build",
-    )
-    // Strip DWARF debug info from the Android .so (symbol tables stay, so UniFFI's
+/** Per build type: the cargo profile flags, its target dir name, and the env. */
+data class CoreProfile(
+    val buildType: String,      // "debug" / "release" (the AGP build type)
+    val cargoArgs: List<String>, // extra `cargo build` args
+    val targetSubdir: String,    // cargo's output dir under target/<triple>/
+    val env: Map<String, String>,
+)
+
+val coreProfiles = listOf(
+    // Strip DWARF debug info from the debug .so (symbol tables stay, so UniFFI's
     // library-mode bindgen and panic backtraces still work). Unstripped, the core
     // is ~145 MB per ABI: a ~450 MB debug APK that took minutes to install and
     // no longer fit on a default 6 GB emulator (INSTALL_FAILED_INSUFFICIENT_STORAGE).
     // With the pinned NDK r28c, AGP's stripDebugDebugSymbols then strips the
     // packaged copy further (16.1 MiB arm64 in the APK); this override still keeps
     // build/rustJniLibs small and doesn't depend on AGP finding its NDK (an older
-    // image with NDK 26.3 skipped that step silently). Only this cross-build gets
-    // the override; host builds (tests, bindgen) are unaffected.
-    environment("CARGO_PROFILE_DEV_STRIP", "debuginfo")
-}
+    // image with NDK 26.3 skipped that step silently).
+    CoreProfile("debug", emptyList(), "debug", mapOf("CARGO_PROFILE_DEV_STRIP" to "debuginfo")),
+    // The release core: optimized, DWARF stripped, symbols kept for bindgen.
+    CoreProfile("release", listOf("--release"), "release", mapOf("CARGO_PROFILE_RELEASE_STRIP" to "debuginfo")),
+)
+// Only these cross-builds get the strip overrides; host builds (tests, bindgen)
+// are unaffected.
 
-val generateUniffiBindings by tasks.registering(Exec::class) {
-    description = "Generates the UniFFI Kotlin bindings from the built cdylib."
-    dependsOn(cargoNdkBuild)
-    workingDir = coreDir
-    commandLine(
-        "cargo", "run", "--bin", "uniffi-bindgen", "--",
-        "generate",
-        "--library", "target/aarch64-linux-android/debug/libpigeon_mobile_core.so",
-        "--language", "kotlin",
-        "--out-dir", uniffiDir.get().asFile.absolutePath,
-    )
+fun String.cap() = replaceFirstChar { it.uppercase() }
+
+coreProfiles.forEach { p ->
+    val jniLibsDir = layout.buildDirectory.dir("rustJniLibs/${p.buildType}")
+    val cargoNdk = tasks.register<Exec>("cargoNdkBuild${p.buildType.cap()}") {
+        description = "Cross-compiles pigeon-mobile-core (${p.buildType}) for the target Android ABIs."
+        workingDir = coreDir
+        commandLine(
+            listOf(
+                "cargo", "ndk",
+                "-t", "arm64-v8a",
+                "-t", "x86_64",
+                "-o", jniLibsDir.get().asFile.absolutePath,
+                "build",
+            ) + p.cargoArgs,
+        )
+        p.env.forEach { (k, v) -> environment(k, v) }
+    }
+    // Bindings come from the *same* variant's library, so a release build never
+    // compiles the debug core just to generate them. The output is identical for
+    // either profile (it's read from the same exported metadata), so both variants
+    // write the one shared source dir.
+    val bindings = tasks.register<Exec>("generateUniffiBindings${p.buildType.cap()}") {
+        description = "Generates the UniFFI Kotlin bindings from the ${p.buildType} cdylib."
+        dependsOn(cargoNdk)
+        workingDir = coreDir
+        commandLine(
+            "cargo", "run", "--bin", "uniffi-bindgen", "--",
+            "generate",
+            "--library", "target/aarch64-linux-android/${p.targetSubdir}/libpigeon_mobile_core.so",
+            "--language", "kotlin",
+            "--out-dir", uniffiDir.get().asFile.absolutePath,
+        )
+    }
+    // AGP 9 registers pre<Variant>Build lazily, so hook it by name as it appears.
+    tasks.configureEach {
+        if (name == "pre${p.buildType.cap()}Build") dependsOn(bindings)
+    }
 }
 
 android {
@@ -78,8 +109,10 @@ android {
         compose = true
     }
 
-    // Pick up the cargo-ndk .so output (packaged as native libs).
-    sourceSets["main"].jniLibs.srcDir(jniLibsDir)
+    // Each build type packages its own cargo-ndk output (see coreProfiles above).
+    coreProfiles.forEach { p ->
+        sourceSets[p.buildType].jniLibs.srcDir(layout.buildDirectory.dir("rustJniLibs/${p.buildType}"))
+    }
 }
 
 // AGP 9 built-in Kotlin: `kotlinOptions` is gone; set the JVM target through the
@@ -95,16 +128,12 @@ kotlin {
 // `android.sourceSets[...].java.srcDir` no longer feeds the Kotlin compiler, so
 // register the generated dir on each variant's Kotlin sources via the Variant API.
 // The dir is pre-created at configuration time (addStaticSourceDirectory requires
-// it to exist); content + ordering come from `preBuild -> generateUniffiBindings`.
+// it to exist); content + ordering come from `pre<Variant>Build -> generateUniffiBindings<Variant>`.
 androidComponents {
     val uniffiOut = uniffiDir.get().asFile.apply { mkdirs() }
     onVariants { variant ->
         variant.sources.kotlin?.addStaticSourceDirectory(uniffiOut.absolutePath)
     }
-}
-
-tasks.named("preBuild") {
-    dependsOn(generateUniffiBindings)
 }
 
 dependencies {

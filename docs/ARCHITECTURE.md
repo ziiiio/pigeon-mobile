@@ -181,7 +181,7 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI view
       │  1. cargo build  (host: tests;  cargo-ndk: per-ABI .so;  iOS targets: static libs)
       │  2. uniffi-bindgen  →  Kotlin bindings (Android)  /  Swift bindings + xcframework (iOS)
       ▼
-   android/  ← bundles .so + Kotlin bindings;  ./gradlew assembleDebug
+   android/  ← bundles .so + Kotlin bindings;  ./gradlew assembleDebug / assembleRelease
    ios/      ← links xcframework + Swift bindings;  xcodebuild
 ```
 
@@ -202,7 +202,7 @@ Same core, packaged as an `xcframework` with UniFFI Swift bindings. SwiftUI view
     docker compose exec android bash -c 'cd android && ./gradlew assembleDebug'
     ```
   Each service has its own `core/target` volume so amd64 and native artifacts don't mix. (CI runs both lanes on native amd64 Linux runners — no emulation there.)
-- **Android cross-compile:** `cargo-ndk` (NDK version + Rust targets + min SDK documented in M0). One Gradle task rebuilds the core, runs codegen, and bundles the `.so`s so `assembleDebug` is a single command.
+- **Android cross-compile:** `cargo-ndk` (NDK version + Rust targets + min SDK documented in M0). Per build type, `cargoNdkBuild<Debug|Release>` builds the core with the matching cargo profile (dev / `--release`, both DWARF-stripped) into `build/rustJniLibs/<buildType>`, `generateUniffiBindings<Debug|Release>` generates the Kotlin bindings from that same library, and `pre<Variant>Build` depends on them, so `assembleDebug` and `assembleRelease` are each a single command and a release APK packages a release core.
 - **iOS cross-compile:** `cargo` for `aarch64-apple-ios` (+ simulator), packaged into an `xcframework`.
 - **CI lanes:** **core** (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, plus a Swift-bindings-generation smoke check), **deny** (`cargo-deny check` over the core — RUSTSEC advisories, license allowlist, sources — from `core/deny.toml`, which mirrors `../pigeon`'s policy; added 2026-11-13), **android** (codegen + `assembleDebug` + lint), and a macOS **ios** lane (xcframework build → `run-hellocore.sh`/`run-tests.sh`/`run-app.sh`). Aggressive caching.
 - **End-to-end lane (`e2e/`):** a **separate crate** (not part of `core/`) that path-deps on `core` + the server's `tests-integration` harness. It boots the real `pigeon` server in-process over a TCP socket (real Postgres via **testcontainers**) and drives the core's FFI against it — the real-wire-contract proof the mock tests can't give. **Requires Docker**, so it is deliberately excluded from `core/`'s build and the core CI lane (the dev container has no Docker socket). Run on a host/CI with Docker: `cd e2e && cargo test`. First proof: the M1 register/login/restore flows (M1.2/M1.3).

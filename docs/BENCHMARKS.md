@@ -21,9 +21,9 @@ numbers below are size and wall-clock only.
 ## Running them
 
 ```bash
-# Android .so sizes: the debug build the APK ships today (dev profile, debug info stripped)
+# Android .so sizes: the debug build (dev profile, debug info stripped)
 docker compose exec android bash -c 'cd android && ./gradlew assembleDebug'
-ls -l android/app/build/rustJniLibs/*/libpigeon_mobile_core.so
+ls -l android/app/build/rustJniLibs/debug/*/libpigeon_mobile_core.so
 ls -l android/app/build/outputs/apk/debug/app-debug.apk
 
 # Android .so size: what a release build would ship (arm64-v8a)
@@ -82,6 +82,23 @@ toolchain (27.5 → 30.7 MiB, still DWARF-stripped), which doesn't ship.
 
 Measured with `unzip -lv android/app/build/outputs/apk/debug/app-debug.apk` after a clean
 `assembleDebug` (delete the old APK first: incremental packaging appends to it).
+
+### Android release build: 2026-11-19
+
+`assembleRelease` now packages a release core (`cargoNdkBuildRelease`: `--release` with
+`CARGO_PROFILE_RELEASE_STRIP=debuginfo`), instead of the debug one. Cold build in the
+container: 9 min 25 s (Rosetta); the debug core is not compiled.
+
+| Artifact | arm64-v8a | x86_64 |
+|---|---:|---|
+| `build/rustJniLibs/release` (cargo; not shipped) | 11.8 MiB (12 334 024 B) | 11.6 MiB (12 186 184 B) |
+| **`.so` inside `app-release-unsigned.apk` (AGP-stripped)** | **8.0 MiB** (8 404 536 B) | 8.7 MiB (9 162 912 B) |
+| `app-release-unsigned.apk` (both ABIs) | 24.1 MiB (25 286 519 B), vs 44.8 MiB debug | |
+
+```bash
+docker compose exec android bash -c 'cd android && ./gradlew assembleRelease'
+unzip -lv android/app/build/outputs/apk/release/app-release-unsigned.apk | grep core.so
+```
 
 ### iOS core
 

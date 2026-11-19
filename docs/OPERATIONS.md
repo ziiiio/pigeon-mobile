@@ -164,10 +164,9 @@ server repo's [`LOCAL_TESTING.md`](../../pigeon/docs/LOCAL_TESTING.md)), and
 The apps are built and run as **debug builds** only. Shipping is M6 work
 (`ROADMAP.md`). Known gaps before a store release:
 
-- **Android release builds would package a debug core.** The `cargoNdkBuild` task always
-  runs `cargo ndk … build` without `--release`, so even a release APK would carry the
-  unoptimized `.so` (Gotcha #10). See [`BENCHMARKS.md`](BENCHMARKS.md) for the size
-  difference.
+- **Android release builds are unsigned.** `assembleRelease` packages an optimized core
+  (`cargoNdkBuildRelease`, `--release`; 8.0 MiB arm64 `.so`, a 24.1 MiB APK, see
+  [`BENCHMARKS.md`](BENCHMARKS.md)), but produces `app-release-unsigned.apk`.
 - **No signing configuration** on either platform (the iOS scripts ad-hoc sign for the
   simulator only). There is no R8/minify on Android.
 - **ABIs:** Android builds `arm64-v8a` and `x86_64` only. `armeabi-v7a` (32-bit phones)
