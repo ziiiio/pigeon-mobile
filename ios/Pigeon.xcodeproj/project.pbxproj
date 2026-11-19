@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2000000000000000000127 /* StoreLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000126 /* StoreLocation.swift */; };
+		2000000000000000000129 /* StoreLocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000128 /* StoreLocationTests.swift */; };
 		2000000000000000000121 /* ChatErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000120 /* ChatErrorTests.swift */; };
 		2000000000000000000123 /* BackupFeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000122 /* BackupFeedbackTests.swift */; };
 		2000000000000000000125 /* TimelineMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000124 /* TimelineMergeTests.swift */; };
@@ -52,6 +54,8 @@
 		2000000000000000000120 /* ChatErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatErrorTests.swift; sourceTree = "<group>"; };
 		2000000000000000000122 /* BackupFeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupFeedbackTests.swift; sourceTree = "<group>"; };
 		2000000000000000000124 /* TimelineMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineMergeTests.swift; sourceTree = "<group>"; };
+		2000000000000000000126 /* StoreLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreLocation.swift; sourceTree = "<group>"; };
+		2000000000000000000128 /* StoreLocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreLocationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000026 /* KeychainKeyStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainKeyStoreTests.swift; sourceTree = "<group>"; };
 		2000000000000000000100 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2000000000000000000027 /* Pigeon.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Pigeon.entitlements; sourceTree = "<group>"; };
@@ -120,6 +124,7 @@
 				2000000000000000000022 /* KeychainKeyStore.swift */,
 				2000000000000000000023 /* PhotoPicker.swift */,
 				2000000000000000000024 /* SyncController.swift */,
+				2000000000000000000126 /* StoreLocation.swift */,
 				2000000000000000000027 /* Pigeon.entitlements */,
 				2000000000000000000100 /* Assets.xcassets */,
 			);
@@ -131,6 +136,7 @@
 			children = (
 				2000000000000000000088 /* AuthErrorTests.swift */,
 				2000000000000000000026 /* KeychainKeyStoreTests.swift */,
+				2000000000000000000128 /* StoreLocationTests.swift */,
 				2000000000000000000120 /* ChatErrorTests.swift */,
 				2000000000000000000122 /* BackupFeedbackTests.swift */,
 				2000000000000000000124 /* TimelineMergeTests.swift */,
@@ -259,6 +265,7 @@
 				2000000000000000000032 /* KeychainKeyStore.swift in Sources */,
 				2000000000000000000033 /* PhotoPicker.swift in Sources */,
 				2000000000000000000034 /* SyncController.swift in Sources */,
+				2000000000000000000127 /* StoreLocation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -268,6 +275,7 @@
 			files = (
 				2000000000000000000098 /* AuthErrorTests.swift in Sources */,
 				2000000000000000000036 /* KeychainKeyStoreTests.swift in Sources */,
+				2000000000000000000129 /* StoreLocationTests.swift in Sources */,
 				2000000000000000000121 /* ChatErrorTests.swift in Sources */,
 				2000000000000000000123 /* BackupFeedbackTests.swift in Sources */,
 				2000000000000000000125 /* TimelineMergeTests.swift in Sources */,

@@ -585,7 +585,16 @@ UI rules both platforms must follow (each was once broken on one of them):
   expiry.
 
 **iOS (M5)** mirrors all of this in SwiftUI under `ios/Pigeon/` over the *same*
-core — see `ARCHITECTURE.md` §6.
+core — see `ARCHITECTURE.md` §6. One iOS-only detail is worth knowing: **where the store
+lives.** The SQLite store caches the decrypted text of encrypted messages (Gotcha #3), and
+iOS backs up Application Support to iCloud by default, so that text could leave the phone.
+Android simply opts out of backups (`allowBackup="false"`). On iOS, `StoreLocation.prepare`
+gives the store its own directory, `Application Support/PigeonStore/`, marks it excluded
+from backup, and sets `completeUnlessOpen` file protection: locked-device reads fail, but a
+file that is already open stays usable, which the sync loop's open database needs
+(`.complete` would break it). It also moves an older install's `pigeon.sqlite3` (and its
+`-wal`/`-shm` files) in as a set, undoing a half-done move and falling back to the old
+location rather than ever splitting a database from its write-ahead log.
 
 ---
 
@@ -615,8 +624,12 @@ per ABI, a ~450 MB APK that took minutes to install and stopped fitting on a def
 emulator (`INSTALL_FAILED_INSUFFICIENT_STORAGE`). `cargoNdkBuild` sets
 `CARGO_PROFILE_DEV_STRIP=debuginfo` (~29 MB per ABI, ~68 MB APK). Symbol tables survive, so
 UniFFI's library-mode bindgen and panic backtraces are unaffected; host builds (tests,
-bindgen) don't get the override. AGP's own `stripDebugDebugSymbols` doesn't do this for us:
-it only strips when it finds the NDK version it expects. If an APK is ever unexpectedly
+bindgen) don't get the override. AGP's own `stripDebugDebugSymbols` then strips the copy it
+packages (to ~16 MiB, a ~45 MiB APK), but only when it finds the NDK version it expects:
+the container image of 2026-06-29 carried NDK 26.3, and the step silently did nothing until
+the image was rebuilt with the pinned r28c. Rebuild the image when `docker/Dockerfile`
+changes (`docker compose build android && docker compose up -d android`) and check
+`echo $ANDROID_NDK_HOME` inside it ends in `28.2.13676358`. If an APK is ever unexpectedly
 large, also check for packaging slack: incremental packaging appends to the old zip, and
 deleting `app-debug.apk` before rebuilding shrinks it back.
 

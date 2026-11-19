@@ -53,7 +53,7 @@ Everything else is a compile-time constant in the core:
 
 | What | Android | iOS | Contains |
 |---|---|---|---|
-| Local store | `filesDir/pigeon.sqlite3` | `Application Support/pigeon.sqlite3` | the event log, folded room state, the sync token, the send queue, **decrypted message text** (Gotcha #3) |
+| Local store | `filesDir/pigeon.sqlite3` | `Application Support/PigeonStore/pigeon.sqlite3`, excluded from backup, `completeUnlessOpen` protection (moved from `Application Support/` on first launch of a newer build) | the event log, folded room state, the sync token, the send queue, **decrypted message text** (Gotcha #3) |
 | Session | `EncryptedSharedPreferences` `pigeon_secure_prefs`, key `pigeon.session.v1` | Keychain service `com.pigeon.mobile.keystore`, account `pigeon.session.v1` | user id, device id, homeserver URL, access token |
 | MLS device state | same store, key `pigeon.mls.state.v1` | same service, account `pigeon.mls.state.v1` | the device's signing identity and all group secrets |
 
@@ -165,4 +165,3 @@ The apps are built and run as **debug builds** only. Shipping is M6 work
   with a debug-only `network-security-config`.
 - **ABIs:** Android builds `arm64-v8a` and `x86_64` only. `armeabi-v7a` (32-bit phones)
   is not built.
-- **The iOS store is not excluded from backups.** See [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md), "Open".

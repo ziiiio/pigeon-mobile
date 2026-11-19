@@ -4,7 +4,8 @@
 //
 //   • the os_log LogSink (M0.7),
 //   • the Keychain-backed KeyStore (M1.3 / Gotcha #1), and
-//   • the local store directory — iOS Application Support (M2.1/M2.2).
+//   • the local store directory — Application Support/PigeonStore, kept out of
+//     backups (M2.1/M2.2; see StoreLocation.swift).
 //
 // Everything downstream (session restore, login, persistence, sync) depends on
 // these being in place, so they belong here rather than in a view. This mirrors
@@ -32,14 +33,20 @@ struct PigeonApp: App {
     private static func installCoreCallbacks() {
         setLogSink(sink: OsLogSink())
         setKeyStore(store: KeychainKeyStore())
-        // The SQLite store lives in the app's Application Support dir. Secrets
-        // never land here — only rooms/timeline/state; the token stays in the
-        // Keychain (Gotcha #1).
+        // The SQLite store lives in Application Support/PigeonStore/, excluded
+        // from iCloud/device backups and file-protected, because it caches the
+        // decrypted text of encrypted messages (Gotcha #3). `StoreLocation`
+        // also moves an older install's store there. Secrets never land in the
+        // store — the token and MLS keys stay in the Keychain (Gotcha #1).
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(
             at: appSupport, withIntermediateDirectories: true)
-        setStoreDir(dir: appSupport.path)
+        let sink = OsLogSink()
+        let storeDir = StoreLocation.prepare(base: appSupport) { level, message in
+            sink.log(level: level, target: "store", message: message)
+        }
+        setStoreDir(dir: storeDir.path)
         emitTestLog(message: "PigeonApp: core callbacks installed")
     }
 }
