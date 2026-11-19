@@ -67,6 +67,22 @@ cross-build, even for a release APK (see [`OPERATIONS.md`](OPERATIONS.md), "Rele
 readiness"), so fixing that is the largest size win available. (2) Per-ABI app bundles
 (an AAB) would stop every phone from downloading both the arm64 and the x86_64 copy.
 
+### Android update: 2026-11-19 (container rebuilt with NDK r28c)
+
+The `android` container image had been built before the NDK r28c pin and carried NDK 26.3,
+so AGP's `stripDebugDebugSymbols` silently skipped. Rebuilt with r28c, it now strips the
+packaged copy. Cargo's own output in `build/rustJniLibs` grew a little with the newer
+toolchain (27.5 → 30.7 MiB, still DWARF-stripped), which doesn't ship.
+
+| Artifact | arm64-v8a | x86_64 |
+|---|---:|---|
+| `build/rustJniLibs` (cargo, DWARF stripped; not shipped) | 30.7 MiB (32 169 104 B) | 30.8 MiB (32 279 280 B) |
+| **`.so` inside `app-debug.apk` (AGP-stripped)** | **16.1 MiB** (16 877 520 B) | 18.8 MiB (19 730 928 B) |
+| `app-debug.apk` (both ABIs) | 44.8 MiB (46 985 328 B), down from 65.1 MiB | |
+
+Measured with `unzip -lv android/app/build/outputs/apk/debug/app-debug.apk` after a clean
+`assembleDebug` (delete the old APK first: incremental packaging appends to it).
+
 ### iOS core
 
 | Artifact | Size | Notes |
