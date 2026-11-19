@@ -78,8 +78,9 @@ The `e2e/` crate starts the real `pigeon` server in-process with a real Postgres
 - `two_clients_exchange_encrypted_messages`: an MLS invite with a Welcome, decryption, and
   a check that the server holds only ciphertext (the M3 gate)
 
-It lives outside `core/` so the fast lane never needs Docker, and it is **not in CI**. Run
-it after any change to a protocol flow, and after pulling server changes into `../pigeon`.
+It lives outside `core/` so the fast lane never needs Docker. CI runs it in the `e2e` job
+(the ubuntu runner has Docker). Run it locally after any change to a protocol flow, and
+after pulling server changes into `../pigeon`.
 Docker Desktop must be running. The first build compiles the whole homeserver.
 
 ## 3. Android
@@ -96,7 +97,7 @@ docker compose exec android bash -c 'cd android && ./gradlew testDebugUnitTest' 
 UniFFI Kotlin bindings, and packages
 `android/app/build/outputs/apk/debug/app-debug.apk`. `testDebugUnitTest` runs the pure
 wording and merge functions (`AuthErrorTest`, `CleartextPolicyTest`, `ChatErrorTest`,
-`BackupFeedbackTest`, `TimelineMergeTest`). CI runs only `assembleDebug`, so run the JVM tests yourself. The
+`BackupFeedbackTest`, `TimelineMergeTest`). CI's `android` job runs both commands. The
 container runs as `linux/amd64` under Rosetta: a cold build is slow, and warm caches live
 in named volumes.
 

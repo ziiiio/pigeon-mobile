@@ -125,6 +125,42 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
         run: ./gradlew assembleDebug --stacktrace
+      # The JVM tests: the view-models' pure wording, merge and policy functions
+      # (AuthErrorTest, CleartextPolicyTest, ChatErrorTest, BackupFeedbackTest,
+      # TimelineMergeTest). Reuses the debug build above.
+      - name: testDebugUnitTest
+        working-directory: pigeon-mobile/android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+  # End-to-end lane: the core's FFI driven against a real homeserver. The e2e
+  # crate boots the actual pigeon server in-process (via ../pigeon's
+  # tests-integration) on a throwaway Postgres from testcontainers, which uses the
+  # runner's Docker daemon (ubuntu-latest ships one). SQLX_OFFLINE: the server's
+  # sqlx query macros compile against pigeon's committed .sqlx cache, as in its own CI.
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pigeon-mobile
+      - uses: actions/checkout@v4
+        with:
+          repository: ziiiio/pigeon
+          path: pigeon
+          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pigeon-mobile/e2e
+
+      - name: e2e (real homeserver + Postgres)
+        working-directory: pigeon-mobile/e2e
+        run: cargo test
 
   # iOS lane (M5.1): cross-compile the core for the Apple targets, generate the
   # Swift bindings, and package the xcframework. macOS-only — the iOS SDK is
