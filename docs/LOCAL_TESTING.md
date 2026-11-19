@@ -26,6 +26,15 @@ repo (see `CLAUDE.md`, "Documentation Sync Rule").
 There is no JDK on this Mac, so the Android **build** runs in the repo's `android` Docker
 container (§3). The Android **emulator** runs on the host.
 
+**Once per clone, enable the docs pre-commit hook** (`.githooks/pre-commit`, see
+CLAUDE.md's Documentation Sync Rule for what it checks):
+
+```bash
+git config core.hooksPath .githooks
+# a genuine false positive (the change really needs no doc update):
+SKIP_DOCS_CHECK=1 git commit ...
+```
+
 ## Which lane for which change
 
 | You changed… | Run |

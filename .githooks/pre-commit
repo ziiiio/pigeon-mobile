@@ -1,0 +1,161 @@
+#!/bin/sh
+# pigeon-mobile pre-commit hook: require the relevant documentation to be updated
+# in the same commit as a *structural* change, per the Documentation Sync Rule in
+# CLAUDE.md. The docs describe what exists today; a commit that lands structural
+# code they contradict is incomplete. Mirrors ../pigeon/.githooks/pre-commit,
+# adapted to this repo's layout.
+#
+# Enforces the high-signal subset that's reliably detectable from a diff:
+#
+#   change detected                                   docs required
+#   ------------------------------------------------  ----------------------------------
+#   core/deny.toml changed                            docs/SECURITY_REVIEW.md
+#   core module added/removed/renamed (core/src/*.rs) docs/ARCHITECTURE.md, docs/CODEBASE_GUIDE.md
+#   FFI surface line added/removed (uniffi::export,   docs/ARCHITECTURE.md, docs/CODEBASE_GUIDE.md
+#     uniffi::Record/Enum/Object/Error)
+#   store schema bump (const SCHEMA_VERSION)          docs/ARCHITECTURE.md, docs/OPERATIONS.md
+#   a tunable constant changed (sync / e2ee /         docs/OPERATIONS.md
+#     session / media, see rule 5)
+#   .github/workflows/*.yml changed                   docs/OPERATIONS.md (the CI table)
+#   iOS script added/removed/renamed (ios/*.sh)       docs/LOCAL_TESTING.md
+#   crate added/removed (core/ or e2e/ Cargo.toml)    README.md, docs/ARCHITECTURE.md
+#
+# A method added *inside* an already-exported impl block changes the FFI too, but
+# its line carries no uniffi marker, so the hook can't see it: that, and
+# ROADMAP.md, CLAUDE.md, LOCAL_TESTING.md's content and the rest of
+# SECURITY_REVIEW.md / BENCHMARKS.md stay the author's job (CLAUDE.md says when).
+#
+# Bypass a false positive (use sparingly):
+#   SKIP_DOCS_CHECK=1 git commit ...
+
+set -u
+
+if [ "${SKIP_DOCS_CHECK:-0}" = "1" ]; then
+    exit 0
+fi
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+is_staged() { printf '%s\n' "$staged" | grep -qx "$1"; }
+
+reasons=""
+missing_docs=""
+
+add_missing() {
+    case " $missing_docs " in
+        *" $1 "*) ;;
+        *) missing_docs="$missing_docs $1" ;;
+    esac
+}
+
+# flag <reason> <doc>...  — record a required-docs rule. Only surfaces (and only
+# fails the commit) if at least one of its docs is not staged.
+flag() {
+    reason=$1
+    shift
+    any_missing=0
+    for d in "$@"; do
+        if ! is_staged "$d"; then
+            any_missing=1
+            add_missing "$d"
+        fi
+    done
+    if [ "$any_missing" = "1" ]; then
+        reasons="${reasons}  - ${reason}
+      → update: $*
+"
+    fi
+}
+
+# Added/removed content lines (no +++/--- headers) of the staged diff for $@.
+changed_lines() {
+    git diff --cached --unified=0 -- "$@" | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' || true
+}
+
+# 1) Dependency policy: core/deny.toml's advisory ignores and license allowlist
+#    are security decisions; SECURITY_REVIEW.md is the register that justifies them.
+if is_staged core/deny.toml; then
+    flag "core/deny.toml changed (an accepted advisory or the license policy)" \
+        docs/SECURITY_REVIEW.md
+fi
+
+# 2) A core module added / removed / renamed. ':(glob)' keeps '*' from crossing
+#    '/', so core/src/bin/uniffi-bindgen.rs doesn't count.
+if git diff --cached --name-only --diff-filter=ADR -- ':(glob)core/src/*.rs' | grep -q .; then
+    flag "a core module was added/removed/renamed (core/src/*.rs)" \
+        docs/ARCHITECTURE.md docs/CODEBASE_GUIDE.md
+fi
+
+core_rs=$(printf '%s\n' "$staged" | grep -E '^core/src/.*\.rs$' || true)
+if [ -n "$core_rs" ]; then
+    # shellcheck disable=SC2086  # word-splitting the file list is intended
+    core_changes=$(changed_lines $core_rs)
+
+    # 3) The FFI surface: an exported item or impl, a Record/Enum/Object/Error type,
+    #    a callback interface.
+    if printf '%s\n' "$core_changes" | grep -qE 'uniffi::(export|Record|Enum|Object|Error)'; then
+        flag "the FFI surface changed (a uniffi::export/Record/Enum/Object/Error line in core/src)" \
+            docs/ARCHITECTURE.md docs/CODEBASE_GUIDE.md
+    fi
+fi
+
+# 4) Store schema version bump.
+if is_staged core/src/store.rs \
+    && changed_lines core/src/store.rs | grep -qE 'const[[:space:]]+SCHEMA_VERSION\b'; then
+    flag "the store schema version changed (const SCHEMA_VERSION in core/src/store.rs)" \
+        docs/ARCHITECTURE.md docs/OPERATIONS.md
+fi
+
+# 5) A tunable constant OPERATIONS.md documents. 'const NAME' with any visibility.
+tunable() { # tunable <file> <name-regex>
+    is_staged "$1" && changed_lines "$1" | grep -qE "const[[:space:]]+($2)\b"
+}
+if tunable core/src/sync.rs 'SYNC_TIMEOUT_MS|SYNC_LIMIT|BACKOFF_[A-Z_]+' \
+    || tunable core/src/e2ee.rs 'KEY_PACKAGE_COUNT|MLS_STATE_KEY' \
+    || tunable core/src/session.rs 'SESSION_KEY|STORE_FILE' \
+    || tunable core/src/media.rs 'MAX_UPLOAD_BYTES'; then
+    flag "a tunable constant changed (sync/e2ee/session/media constant documented in OPERATIONS)" \
+        docs/OPERATIONS.md
+fi
+
+# 6) CI changed: OPERATIONS.md lists every job and secret.
+if printf '%s\n' "$staged" | grep -qE '^\.github/workflows/[^/]+\.ya?ml$' \
+    || git diff --cached --name-only --diff-filter=D -- ':(glob).github/workflows/*.yml' | grep -q .; then
+    flag "a CI workflow changed (.github/workflows/*.yml)" \
+        docs/OPERATIONS.md
+fi
+
+# 7) An iOS script added / removed / renamed: LOCAL_TESTING.md names each one.
+if git diff --cached --name-only --diff-filter=ADR -- ':(glob)ios/*.sh' | grep -q .; then
+    flag "an iOS script was added/removed/renamed (ios/*.sh)" \
+        docs/LOCAL_TESTING.md
+fi
+
+# 8) A crate added / removed.
+if git diff --cached --name-only --diff-filter=AD -- core/Cargo.toml e2e/Cargo.toml | grep -q .; then
+    flag "a crate was added or removed (core/Cargo.toml or e2e/Cargo.toml)" \
+        README.md docs/ARCHITECTURE.md
+fi
+
+if [ -n "$missing_docs" ]; then
+    cat >&2 <<EOF
+✗ pre-commit: this commit makes a structural change but does not update all of
+  the docs that describe it. Detected:
+
+$reasons
+  Missing (update the matching section and stage it):$missing_docs
+
+  ARCHITECTURE.md is the structural map; CODEBASE_GUIDE.md is the newcomer
+  tutorial; README.md is the front door; OPERATIONS.md holds the constants, the
+  on-device data, the schema version and the CI table; LOCAL_TESTING.md names
+  every test script; SECURITY_REVIEW.md is the security register. If the change
+  genuinely needs no doc update, bypass with:
+
+      SKIP_DOCS_CHECK=1 git commit ...
+
+  (See CLAUDE.md, "Documentation Sync Rule".)
+EOF
+    exit 1
+fi
+
+exit 0
