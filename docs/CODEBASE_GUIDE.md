@@ -174,6 +174,7 @@ android/                    # the Android app (Gradle, Kotlin, Jetpack Compose)
       AuthViewModel.kt      # the thin view-model over the core's session API
       AuthScreen.kt         # the sign-in / register form
       AuthError.kt          # typed CoreException → user-facing message
+      CleartextPolicy.kt    # refuse http:// homeservers the build doesn't allow
     rooms/
       RoomsViewModel.kt     # thin VM: room list, sync lifecycle, create/join/invite
       RoomListScreen.kt     # the signed-in landing screen (+ sign out)
@@ -498,9 +499,19 @@ crypto logic. It:
 - exposes a `StateFlow<AuthState>` (a sealed interface: `Restoring` / `SignedOut` /
   `Submitting` / `SignedIn`);
 - on init, calls `restoreSession()` (offline-first launch);
-- `login`/`register` call the core's suspend fns and stash the returned handle;
+- `login`/`register` first ask `cleartextRefusal` whether the address may be used (below),
+  then call the core's suspend fns and stash the returned handle;
 - `logout` handles the subtle case where the server revoke fails but the session is still
   live (stay signed in, show a retryable error).
+
+**`CleartextPolicy.kt`** guards the one thing the platform can't: an `http://` homeserver.
+The manifest's `network-security-config` says "HTTPS only" (a debug-only override allows the
+emulator's `10.0.2.2` and `localhost`), but Android enforces that policy inside its *own* HTTP
+stacks, and the core's `reqwest` client opens its own sockets. So the view-model asks the same
+policy, `NetworkSecurityPolicy.isCleartextTrafficPermitted(host)`, before the password goes
+anywhere, and shows a plain refusal instead. The policy is injected so the function unit-tests
+on the JVM (`CleartextPolicyTest`); iOS mirrors it with a `#if DEBUG` allowlist of `localhost`,
+because App Transport Security has the same blind spot.
 
 **`AuthError.kt`** is the *only* place error text is decided, and it branches on the
 **typed `ErrorCode`**, never on strings (e.g. `UserInUse` → "That username is already

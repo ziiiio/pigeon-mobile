@@ -87,6 +87,13 @@ deletes the MLS state: the next sign-in is a new device.
 
 The core is offline-first. Reads come from the local store, and the network catches up.
 
+- **HTTPS only, except dev hosts in debug builds.** Sign-in and registration refuse an
+  `http://` homeserver unless the build allows it: release builds allow none; debug builds
+  allow `10.0.2.2` and `localhost` on Android (`src/debug/res/xml/network_security_config.xml`)
+  and `localhost` on iOS. The app checks this itself (`cleartextRefusal`) because the
+  core's `reqwest` client opens its own sockets, which Android's network-security-config
+  and iOS's App Transport Security don't govern.
+
 - **Sync loop.** `run_sync` long-polls `/sync` while the signed-in screen is open, and
   leaving the screen cancels it (Gotcha #6). The server answers a parked poll as soon as
   something arrives **for this user** (a message in one of their rooms, a membership change
@@ -161,7 +168,5 @@ The apps are built and run as **debug builds** only. Shipping is M6 work
   difference.
 - **No signing configuration** on either platform (the iOS scripts ad-hoc sign for the
   simulator only). There is no R8/minify on Android.
-- **Cleartext HTTP is allowed on Android** (`usesCleartextTraffic="true"`). Restrict it
-  with a debug-only `network-security-config`.
 - **ABIs:** Android builds `arm64-v8a` and `x86_64` only. `armeabi-v7a` (32-bit phones)
   is not built.

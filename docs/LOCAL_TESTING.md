@@ -95,8 +95,8 @@ docker compose exec android bash -c 'cd android && ./gradlew testDebugUnitTest' 
 `assembleDebug` cross-compiles the core for `arm64-v8a` and `x86_64`, regenerates the
 UniFFI Kotlin bindings, and packages
 `android/app/build/outputs/apk/debug/app-debug.apk`. `testDebugUnitTest` runs the pure
-wording and merge functions (`AuthErrorTest`, `ChatErrorTest`, `BackupFeedbackTest`,
-`TimelineMergeTest`). CI runs only `assembleDebug`, so run the JVM tests yourself. The
+wording and merge functions (`AuthErrorTest`, `CleartextPolicyTest`, `ChatErrorTest`,
+`BackupFeedbackTest`, `TimelineMergeTest`). CI runs only `assembleDebug`, so run the JVM tests yourself. The
 container runs as `linux/amd64` under Rosetta: a cold build is slow, and warm caches live
 in named volumes.
 
@@ -133,10 +133,11 @@ ios/run-app.sh         # build, install and launch it; assert it boots and stays
 - `build-core.sh` builds the core in release mode for device arm64 and a fat
   arm64/x86_64 simulator slice, then generates the Swift bindings. Both outputs are
   git-ignored.
-- `run-tests.sh` runs `PigeonTests` (28 tests): the real-Keychain `KeychainKeyStoreTests`,
-  plus `AuthErrorTests`, `ChatErrorTests`, `BackupFeedbackTests` and `TimelineMergeTests`.
-  The last three mirror Android's `ChatErrorTest`, `BackupFeedbackTest` and
-  `TimelineMergeTest` case for case (each file says so in its header), so a wording or
+- `run-tests.sh` runs `PigeonTests` (40 tests): the real-Keychain `KeychainKeyStoreTests`,
+  `StoreLocationTests` (the backup-excluded store directory and its migration), plus
+  `AuthErrorTests`, `CleartextPolicyTests`, `ChatErrorTests`, `BackupFeedbackTests` and
+  `TimelineMergeTests`. The last four mirror Android's `CleartextPolicyTest`,
+  `ChatErrorTest`, `BackupFeedbackTest` and `TimelineMergeTest` case for case (each file says so in its header), so a wording or
   behaviour change that lands on one platform only fails on the other. It ad-hoc signs the
   app so the Keychain entitlement is present.
 - `run-app.sh` launches the app and checks the unified log for

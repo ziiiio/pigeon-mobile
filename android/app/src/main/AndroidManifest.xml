@@ -11,10 +11,12 @@
         android:icon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        android:usesCleartextTraffic="true">
-        <!-- usesCleartextTraffic is for talking to a local dev homeserver over
-             http:// (e.g. 10.0.2.2:8008 from the emulator). Production servers
-             are https; tighten this to a network-security-config before release.
+        android:networkSecurityConfig="@xml/network_security_config">
+        <!-- networkSecurityConfig: HTTPS only (res/xml/network_security_config.xml).
+             The debug build swaps in src/debug/res/xml/network_security_config.xml,
+             which also allows http:// to 10.0.2.2 and localhost only, so the
+             emulator can reach a local dev homeserver at http://10.0.2.2:8008.
+             A release build never sends tokens over cleartext.
              allowBackup=false: the encrypted session store must not be included
              in cloud/adb backups. -->
         <activity

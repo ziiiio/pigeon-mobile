@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release (and every non-debug) build: HTTPS only. Access tokens and the key
+  backup travel in these requests, so cleartext is never allowed. The debug build
+  overrides this file (src/debug/res/xml/network_security_config.xml) to reach a
+  local dev homeserver over http://.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

@@ -49,10 +49,12 @@ final class AuthViewModel: ObservableObject {
     }
 
     func login(server: String, username: String, password: String) {
+        if refuseCleartext(server) { return }
         submit { try await PigeonCore.login(server: server.trimmed, user: username.trimmed, password: password) }
     }
 
     func register(server: String, username: String, password: String) {
+        if refuseCleartext(server) { return }
         submit { try await PigeonCore.register(server: server.trimmed, username: username.trimmed, password: password) }
     }
 
@@ -75,6 +77,15 @@ final class AuthViewModel: ObservableObject {
                                   error: authErrorMessage(error))
             }
         }
+    }
+
+    /// Refuse an `http://` homeserver this build doesn't allow, before the password
+    /// goes anywhere (see `cleartextRefusal`: the core's own sockets ignore ATS).
+    /// Mirrors Android's `refuseCleartext`. Returns true if refused.
+    private func refuseCleartext(_ server: String) -> Bool {
+        guard let refusal = cleartextRefusal(server) else { return false }
+        state = .signedOut(error: refusal)
+        return true
     }
 
     private func submit(_ call: @escaping () async throws -> PigeonClient) {

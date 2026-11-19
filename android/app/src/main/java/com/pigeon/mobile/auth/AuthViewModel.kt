@@ -70,11 +70,26 @@ class AuthViewModel : ViewModel() {
         }
     }
 
-    fun login(server: String, username: String, password: String) =
+    fun login(server: String, username: String, password: String) {
+        if (refuseCleartext(server)) return
         submit { coreLogin(server.trim(), username.trim(), password) }
+    }
 
-    fun register(server: String, username: String, password: String) =
+    fun register(server: String, username: String, password: String) {
+        if (refuseCleartext(server)) return
         submit { coreRegister(server.trim(), username.trim(), password) }
+    }
+
+    /**
+     * Refuse an `http://` homeserver this build doesn't allow, before the password goes
+     * anywhere (see [cleartextRefusal]: the core's own sockets ignore the platform
+     * policy, so it is checked here). Returns true if refused.
+     */
+    private fun refuseCleartext(server: String): Boolean {
+        val refusal = cleartextRefusal(server) ?: return false
+        _state.value = AuthState.SignedOut(refusal)
+        return true
+    }
 
     /**
      * Sign out: revoke the token server-side and clear the persisted session
