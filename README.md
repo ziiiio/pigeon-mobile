@@ -36,7 +36,7 @@ The client must do MLS (RFC 9420) encryption **on-device**, and private keys mus
 core/        # pigeon-mobile-core — the shared Rust crate (UniFFI); reuses pigeon-crypto + pigeon-core
 android/     # the Android app (Gradle, Kotlin, Jetpack Compose)
 ios/         # the iOS app (Swift, SwiftUI; the same core packaged as an xcframework)
-docs/        # architecture, codebase guide, operations, local testing, security register, benchmarks
+docs/        # architecture, codebase guide, operations, local testing, security register, benchmarks, release plan
 CLAUDE.md    # rulebook for contributors / AI assistants
 ROADMAP.md   # the phase plan
 ```
@@ -92,6 +92,7 @@ Then point the app at that server's address on first launch. The reference CLI i
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — what the apps keep on a device, network behaviour, logs, CI, and release gaps.
 - [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md) — the security register: fixed findings, open gaps, accepted weaknesses, ignored advisories.
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — binary-size and test/build-time baselines.
+- [`docs/RELEASE.md`](docs/RELEASE.md) — the plan for publishing to Google Play and the App Store, test builds first.
 - [`../pigeon`](../pigeon) — the homeserver and the **authoritative protocol source**.
 
 ## Security
