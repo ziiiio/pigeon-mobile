@@ -212,6 +212,40 @@ async fn logout_revokes_token_and_clears_session() {
 
 #[tokio::test]
 #[serial]
+async fn logout_deletes_the_store_key() {
+    // The store key seals the local store's at-rest text; it belongs to the
+    // session, so signing out must delete it (the next session gets a fresh one).
+    let store = MockKeyStore::install();
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/_pigeon/client/v1/logout"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let client = login(server.uri(), "alice".into(), "hunter2".into())
+        .await
+        .expect("login ok");
+    // As left by a store opened in the app's data dir.
+    store
+        .map
+        .lock()
+        .unwrap()
+        .insert("pigeon.store.key.v1".into(), vec![7u8; 16]);
+
+    client.logout().await.expect("logout ok");
+    assert!(
+        !store
+            .map
+            .lock()
+            .unwrap()
+            .contains_key("pigeon.store.key.v1"),
+        "logout deleted the store key"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn logout_clears_session_even_when_server_revoke_fails() {
     // No `/logout` mock is mounted, so the revoke returns a 404. Logout must
     // still wipe the local session (best-effort revoke — offline-friendly).

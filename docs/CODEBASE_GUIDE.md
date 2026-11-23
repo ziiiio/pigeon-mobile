@@ -337,6 +337,24 @@ stream (finding C1 — both advance the ratchet, so they share one ordering);
 `set_commit_processed` marks a commit done. Reads: `timeline` (depth-ordered, back-paginatable,
 hides `p.mls.commit` plumbing), `list_rooms`, `membership`, `current_state`, `is_room_encrypted`.
 
+**v4 seals what the server never saw.** End-to-end encryption protects a message on the
+wire and on the server, but the store keeps the *decrypted* text so the timeline can render
+it (and because the ratchet can't decrypt it twice). Without more care, anyone who copies the
+app's files (a forensic image, a rooted phone) could read that history. So the store seals
+it with `pigeon_crypto::seal` under a **store key**: 128 random bits created on first open
+and kept only in the platform keystore (`pigeon.store.key.v1`), never in the database.
+Three things are sealed: `events.decrypted`, our own message bodies in encrypted rooms
+(moved out of the event JSON into `decrypted`), and the send queue's bodies. Each value is
+bound to its row (the event id or the txn id), so copying one row's value onto another fails
+to open, exactly like a wrong key. Plaintext-room messages, room names and state stay
+readable: the server has them anyway. Callers never see any of this: `timeline` and
+`pending_sends` return plaintext, and `set_decrypted`/`queue_send`/`resolve_send` seal on
+the way in. Two details make it hold up: a sealed check value in `store_meta` notices when
+the key no longer matches (the keystore was reset but the file wasn't) and rebuilds the
+cache from the server instead of failing every read; and `secure_delete` plus a WAL
+checkpoint after the v4 migration mean the old plaintext doesn't linger in the file. This is
+the same approach as Element X's store (matrix-rust-sdk), with the crypto in `pigeon-crypto`.
+
 ### 3.5 `sync.rs` — the long-poll `/sync` loop (M2.2+)
 
 `PigeonClient.run_sync(observer)` is an endless async FFI that long-polls

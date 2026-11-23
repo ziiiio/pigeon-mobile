@@ -296,6 +296,7 @@ Stick to these unless you have a specific reason and have discussed it.
 - **Shared Rust core via UniFFI**, thin native UI. Not native reimplementation (would duplicate MLS — unacceptable). Not a cross-platform UI framework (keeps the stack to Rust + Kotlin + Swift). If a change would reverse this, flag it loudly.
 - **Android first, iOS later.** iOS reuses the *same* core; the only iOS-new work is SwiftUI + Apple OS integration.
 - **Crypto is `pigeon-crypto`, reused, not reinvented.** MLS via `openmls`. Same as the server repo's Decision on E2EE.
+- **The local store seals text the server never saw (schema v4, 2026-11-23)** with `pigeon_crypto::seal` under a per-install key in the platform keystore (`pigeon.store.key.v1`), each value bound to its row — option 1 of the at-rest review, chosen over SQLCipher (new C/OpenSSL dependency, harder cross-builds, the e2e SQLite link risk) and over OS encryption only. Metadata stays unsealed by design; widening to Element-style sealed metadata is a possible later phase.
 - **The app speaks only the Client–Server API.** No direct federation. The homeserver is the single point of contact.
 - **Separate repository** from the homeserver; depends on the server's client-side crates (`pigeon-crypto`, `pigeon-core`) and pins a server protocol version.
 

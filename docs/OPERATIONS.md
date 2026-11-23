@@ -53,27 +53,33 @@ Everything else is a compile-time constant in the core:
 
 | What | Android | iOS | Contains |
 |---|---|---|---|
-| Local store | `filesDir/pigeon.sqlite3` | `Application Support/PigeonStore/pigeon.sqlite3`, excluded from backup, `completeUnlessOpen` protection (moved from `Application Support/` on first launch of a newer build) | the event log, folded room state, the sync token, the send queue, **decrypted message text** (Gotcha #3) |
+| Local store | `filesDir/pigeon.sqlite3` | `Application Support/PigeonStore/pigeon.sqlite3`, excluded from backup, `completeUnlessOpen` protection (moved from `Application Support/` on first launch of a newer build) | the event log, folded room state, the sync token, the send queue, **decrypted message text** (Gotcha #3). Text the server never saw in the clear (decrypted messages, our own sends in encrypted rooms, the send queue) is **sealed** under the store key (schema v4) |
 | Session | `EncryptedSharedPreferences` `pigeon_secure_prefs`, key `pigeon.session.v1` | Keychain service `com.pigeon.mobile.keystore`, account `pigeon.session.v1` | user id, device id, homeserver URL, access token |
 | MLS device state | same store, key `pigeon.mls.state.v1` | same service, account `pigeon.mls.state.v1` | the device's signing identity and all group secrets |
+| Store key | same store, key `pigeon.store.key.v1` | same service, account `pigeon.store.key.v1` | the 128-bit key that seals the local store's at-rest text (created on first store open; deleted on sign-out) |
 
 The host app passes the store directory in at launch (`set_store_dir`). If it is unset,
-the core falls back to an in-memory store and logs a warning. The two secret entries go
-only through the host `KeyStore` callback, never into the store. See
-[`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for how each platform protects them and for
-the open backup and at-rest gaps.
+the core falls back to an in-memory store and logs a warning. The three secret entries go
+only through the host `KeyStore` callback, never into the store. If the store key is lost
+while the store file remains (for example the keystore was reset), the core detects it on
+open, clears the local cache and rebuilds it from the server; previously decrypted history
+is then gone, as after a reinstall. See [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md) for how
+each platform protects these entries.
 
 **Wiping an app's data** works like losing the phone: the session and the MLS keys are
 gone, and the user must sign in again and restore from a key backup. The exact commands
 for both simulators are in the server repo's
 [`LOCAL_TESTING.md`](../../pigeon/docs/LOCAL_TESTING.md) (§6). **Signing out** also
-deletes the MLS state: the next sign-in is a new device.
+deletes the MLS state, clears the local store and deletes the store key: the next sign-in
+is a new device with an empty store.
 
 ## Upgrades
 
 - **Store migrations run automatically** when the store opens. The schema version lives in
-  SQLite's `user_version` (currently **3**: v1 events/state/token, v2 local echo + send
-  queue, v3 decrypted-text cache). Migrations are append-only, so a newer app upgrades an
+  SQLite's `user_version` (currently **4**: v1 events/state/token, v2 local echo + send
+  queue, v3 decrypted-text cache, v4 at-rest sealing). The v4 migration seals an existing
+  store's plaintext in one transaction, then checkpoints the WAL; with SQLite's
+  `secure_delete` on, the old plaintext doesn't linger in the file. Migrations are append-only, so a newer app upgrades an
   older store in place. A downgrade to an app with a lower version is not supported.
 - **Keystore entries are versioned by name** (`…v1`). A format change must use a new key
   name and migrate, never reinterpret the old bytes.

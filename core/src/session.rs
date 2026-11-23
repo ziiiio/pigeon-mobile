@@ -33,6 +33,11 @@ const SESSION_KEY: &str = "pigeon.session.v1";
 const BACKUP_ROOM: &str = "!e2ee-backup";
 const BACKUP_SESSION: &str = "mls-device-state";
 
+/// Keystore entry holding the store key: the per-install 128-bit key that seals
+/// the store's at-rest text (`store.rs`, schema v4). Only ever in the platform
+/// keystore, never in the store; deleted on sign-out.
+const STORE_KEY: &str = "pigeon.store.key.v1";
+
 /// The SQLite file name inside the host's configured data dir (single-account
 /// client — one store per app; multi-account would key this per user).
 const STORE_FILE: &str = "pigeon.sqlite3";
@@ -180,6 +185,11 @@ impl PigeonClient {
         // Wipe the MLS device state too — a new login mints a fresh identity, so
         // the old private keys/groups must not linger in the keystore (Gotcha #1).
         E2ee::clear()?;
+        // And the local store with its key: the cached history (including the
+        // decrypted text of encrypted messages) belongs to this session only. The
+        // next session opens an empty store under a fresh key.
+        self.store.wipe()?;
+        ks_delete(STORE_KEY)?;
         Ok(())
     }
 
@@ -331,7 +341,7 @@ pub fn set_store_dir(dir: String) {
 fn open_store() -> Result<Arc<Store>, CoreError> {
     let dir = STORE_DIR.read().expect("store dir lock poisoned").clone();
     let store = match dir {
-        Some(dir) => Store::open(&dir.join(STORE_FILE))?,
+        Some(dir) => Store::open(&dir.join(STORE_FILE), store_key()?)?,
         None => {
             crate::emit(
                 LogLevel::Warn,
@@ -342,6 +352,24 @@ fn open_store() -> Result<Arc<Store>, CoreError> {
         }
     };
     Ok(Arc::new(store))
+}
+
+/// The store key from the keystore, created on first use. Without a keystore
+/// (a host that installed none) the key is ephemeral: a persistent store then
+/// can't be read next run and is rebuilt from the server (warned).
+fn store_key() -> Result<Vec<u8>, CoreError> {
+    if let Some(key) = ks_get(STORE_KEY)? {
+        return Ok(key);
+    }
+    let key = pigeon_crypto::new_seal_key()?;
+    if !ks_put(STORE_KEY, key.clone())? {
+        crate::emit(
+            LogLevel::Warn,
+            "session",
+            "no key store installed; the local store's key won't survive a restart",
+        );
+    }
+    Ok(key)
 }
 
 static KEY_STORE: RwLock<Option<Box<dyn KeyStore>>> = RwLock::new(None);

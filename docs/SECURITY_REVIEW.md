@@ -30,6 +30,7 @@ belongs to M6 (see `ROADMAP.md`).
 | — | 2026-10-04 | Medium (integrity) | **Restart-reused transaction ids.** Once the server honoured `/send` txn ids (`../pigeon` `21a0d1a`), the process-local `mob-td-{counter}` ids repeated after an app restart. A repeated commit broadcast would have been swallowed as a duplicate, leaving earlier members an epoch behind. | Ids are `mob-td-{millis}-{n}`. (`0e057d7`) | `rooms::txn_ids_never_repeat_and_carry_a_timestamp` |
 | — | 2026-07-17 | Low (test gap) | **No tampered-backup negative test** (the server's C5). | Added: flipping a ciphertext byte must fail even with the correct recovery key. | `e2ee::backup_restores_groups_and_rejects_wrong_recovery_key` |
 | — | 2026-11-19 (found 2026-11-16) | Medium (release blocker) | **Cleartext HTTP to any homeserver, on both platforms.** Android set `usesCleartextTraffic="true"`. Fixing that alone would not have helped: Android's cleartext policy is enforced by the platform HTTP stacks, not raw sockets, and the core's `reqwest` client opens its own, so a release build would still have sent the password and token over `http://`. iOS had the same gap (App Transport Security governs URLSession only). | Android: a network-security-config (release: no cleartext; debug override: `10.0.2.2`, `localhost`), and the auth view-model asks that same policy (`NetworkSecurityPolicy.isCleartextTrafficPermitted`) via `cleartextRefusal` before the address reaches the core. iOS: the same `cleartextRefusal` check with a `#if DEBUG` allowlist of `localhost`. (`de40915`) | Android `CleartextPolicyTest` (5) and iOS `CleartextPolicyTests` (5 mirrored + the Debug allowlist + exact wording); `aapt2 dump xmltree` of the debug APK shows the override and the manifest reference; the release APK's config is `cleartextTrafficPermitted=false` with no dev hosts. On the emulator (2026-11-19, fresh install): `http://10.0.2.2:8008` reaches the server; `http://example.com` is refused before any request |
+| — | 2026-11-23 (found 2026-11-16) | Medium | **Decrypted message text sat unencrypted on disk.** The store was plain SQLite, protected only by the OS sandbox and file protection, so a rooted or jailbroken device or a forensic image could read decrypted history, our own sends in encrypted rooms and queued drafts. | Option 1 of the 2026-11-19 review (Element X's approach): `pigeon-crypto` gained `seal`/`open_sealed` (`../pigeon` `b960c07`); the store (schema v4) seals `events.decrypted`, own message bodies in encrypted rooms and `pending_sends.body` under a per-install key held only in the platform keystore (`pigeon.store.key.v1`), each bound to its row. The v4 migration seals existing stores in one transaction; `secure_delete` + a WAL checkpoint scrub the old plaintext; a sealed check value detects a lost key and rebuilds the cache; sign-out wipes the store and deletes the key. Limits: protects copies of the files, not code running on an unlocked device (it can use the keystore); metadata (room names, members, timestamps) is not sealed. (commit: `fix: seal the store's at-rest text (schema v4)`) | store: `text_the_server_never_saw_is_not_on_disk_in_clear` (reads the db + WAL bytes), `a_v3_store_migrates_to_sealed_v4` (and the old plaintext is gone from the file), `a_sealed_value_moved_or_tampered_fails_with_a_typed_error`, `reopening_under_a_different_key_clears_the_cache_instead_of_failing`, `wipe_empties_the_store`, `plaintext_room_echoes_stay_inline`; session: `logout_deletes_the_store_key`; e2e 3/3 |
 | — | 2026-11-19 (found 2026-11-16) | Medium | **iOS store included in device and iCloud backups.** `pigeon.sqlite3` lived in Application Support with default protection and no backup exclusion, and it caches the **decrypted text** of encrypted messages (Gotcha #3), so that text could leave the device in a backup. | `StoreLocation.prepare` puts the store in `Application Support/PigeonStore/` with `isExcludedFromBackup` and `FileProtectionType.completeUnlessOpen` (an open database keeps working while the device is locked), and moves an older install's store and `-wal`/`-shm` in as a set, falling back to the old location on failure. (`2e49567`) | `StoreLocationTests` (5: created + excluded, legacy set moved, idempotent, live copy wins, fallback); on `pigeon-sim`: a seeded legacy store moved with its data and the directory carries `com.apple.metadata:com_apple_backup_excludeItem` |
 
 Server-side hardening that needed **no** client change (C4 media key/nonce checks, strict
@@ -63,7 +64,9 @@ by running e2e's server out of process (no shared graph) and moving to **rusqlit
 libsqlite3-sys 0.40 (SQLite 3.54.1)**. This is the precedent for CLAUDE.md's "tests never
 pin dependencies" rule.
 
-**Patched rather than accepted:** `rustls`, `rustls-webpki`, `h2` and `crossbeam-epoch`
+**Patched rather than accepted:** `url` 2.5.8 → 2.5.9 (RUSTSEC-2026-0592, stack overflow
+in `Url::origin()` on nested `blob:` URLs; 2026-11-23, both lockfiles; same as the server's).
+Earlier: `rustls`, `rustls-webpki`, `h2` and `crossbeam-epoch`
 (2026-10-04, `df10024`); `rustls`, `rustls-webpki`, `webpki-roots` and `tokio`
 (RUSTSEC-2026-0346..0349, -0381, -0382, -0386; 2026-11-13, `6f2bbb8`).
 
@@ -72,7 +75,8 @@ pin dependencies" rule.
 Checked against the code on 2026-11-16:
 
 - **Secrets stay in the core and the platform keystore.** The access token and the MLS
-  device state (`pigeon.session.v1`, `pigeon.mls.state.v1`) are written only through the
+  device state (`pigeon.session.v1`, `pigeon.mls.state.v1`) and the store key
+  (`pigeon.store.key.v1`) are written only through the
   host `KeyStore` callback. Android stores them with `EncryptedSharedPreferences`
   (`pigeon_secure_prefs`, AES256-SIV keys / AES256-GCM values, under an Android Keystore
   master key). iOS stores them in the Keychain (`com.pigeon.mobile.keystore`,
@@ -106,7 +110,7 @@ These are real gaps, recorded here so they aren't lost. Each is a hardening item
 
 | Found | Severity | Gap | Direction |
 |---|---|---|---|
-| 2026-11-16 | Medium | **Decrypted message text sits unencrypted on disk.** On both platforms the store is plain SQLite. It is protected only by the OS sandbox (and on iOS by file protection). A rooted or jailbroken device, or a forensic image, can read decrypted history. | Decide whether to encrypt the store at rest (for example with a key held in the platform keystore). That is a new-dependency/design decision for M6. |
+| — | — | — | *(nothing open)* |
 
 ## Accepted (documented, not fixed)
 
