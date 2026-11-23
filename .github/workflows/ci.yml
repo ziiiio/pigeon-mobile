@@ -21,17 +21,18 @@ jobs:
       # The core path-depends on ../pigeon/crates/*, so check both repos out as
       # siblings under the workspace (pigeon-mobile/ next to pigeon/).
       # The homeserver repo is private, so the sibling checkout authenticates with
-      # a fine-grained PAT (read-only Contents on ziiiio/pigeon) stored as the
-      # PIGEON_REPO_TOKEN repo secret — the default GITHUB_TOKEN can only read
+      # a read-only DEPLOY KEY on ziiiio/pigeon whose private half is stored as the
+      # PIGEON_DEPLOY_KEY repo secret (least privilege: read access to that one
+      # repo, nothing else) — the default GITHUB_TOKEN can only read
       # this repo.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: pigeon-mobile
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ziiiio/pigeon
           path: pigeon
-          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+          ssh-key: ${{ secrets.PIGEON_DEPLOY_KEY }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,14 +75,14 @@ jobs:
     name: cargo-deny (supply chain)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: pigeon-mobile
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ziiiio/pigeon
           path: pigeon
-          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+          ssh-key: ${{ secrets.PIGEON_DEPLOY_KEY }}
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: pigeon-mobile/core/Cargo.toml
@@ -93,14 +94,14 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: pigeon-mobile
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ziiiio/pigeon
           path: pigeon
-          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+          ssh-key: ${{ secrets.PIGEON_DEPLOY_KEY }}
 
       - uses: actions/setup-java@v4
         with:
@@ -144,14 +145,14 @@ jobs:
     env:
       SQLX_OFFLINE: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: pigeon-mobile
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ziiiio/pigeon
           path: pigeon
-          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+          ssh-key: ${{ secrets.PIGEON_DEPLOY_KEY }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -170,16 +171,19 @@ jobs:
   # `xcodebuild -create-xcframework` is macOS-only. The Linux `core` lane already
   # smoke-checks that the Swift bindings *generate*; this lane proves they build.
   ios:
-    runs-on: macos-14
+    # macos-14 was retired by GitHub (jobs failed with "The configuration
+    # 'macos-14-arm64-us-default' is not supported"). The project needs only
+    # Swift 5.9 tools and an iOS 15 target, so any current image's Xcode works.
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: pigeon-mobile
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ziiiio/pigeon
           path: pigeon
-          token: ${{ secrets.PIGEON_REPO_TOKEN }}
+          ssh-key: ${{ secrets.PIGEON_DEPLOY_KEY }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:

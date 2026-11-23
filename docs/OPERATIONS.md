@@ -151,7 +151,17 @@ strict.
 
 `.github/workflows/ci.yml` runs five jobs on every push and PR. The homeserver repo is
 private, so every job checks out `../pigeon` (for the path dependencies) with the
-**`PIGEON_REPO_TOKEN`** secret, a fine-grained read-only token.
+**`PIGEON_DEPLOY_KEY`** secret: the private half of a **read-only deploy key** on
+`ziiiio/pigeon` (it can read that one repo and nothing else; revoke it under the pigeon
+repo's Settings → Deploy keys). It replaced a fine-grained token, `PIGEON_REPO_TOKEN`,
+which was never actually set, so the jobs that need `../pigeon` had failed at checkout
+since 2026-10-04. To recreate it:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "pigeon-mobile CI (read-only)" -f /tmp/pigeon_ci_key
+(cd ../pigeon && gh repo deploy-key add /tmp/pigeon_ci_key.pub --title "pigeon-mobile CI (read-only)")
+gh secret set PIGEON_DEPLOY_KEY < /tmp/pigeon_ci_key && rm /tmp/pigeon_ci_key /tmp/pigeon_ci_key.pub
+```
 
 | Job | Runner | Runs |
 |---|---|---|
@@ -159,7 +169,7 @@ private, so every job checks out `../pigeon` (for the path dependencies) with th
 | `deny` | ubuntu | `cargo deny check` over `core/` (register: [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md)) |
 | `android` | ubuntu | `./gradlew assembleDebug`, then `./gradlew testDebugUnitTest` (JDK 25, SDK 36, NDK r28c) |
 | `e2e` | ubuntu | `cargo test` in `e2e/`: builds `pigeon-server` from `../pigeon` (`SQLX_OFFLINE=true`, against its committed `.sqlx` cache) and runs it out of process on a `postgres:16` container (the runner's Docker) |
-| `ios` | macos-14 | `ios/build-core.sh`, `ios/run-tests.sh`, `ios/run-app.sh` |
+| `ios` | macos-15 | `ios/build-core.sh`, `ios/run-tests.sh`, `ios/run-app.sh` |
 
 Not in CI: running the apps on an emulator or simulator against a live homeserver (the
 server repo's [`LOCAL_TESTING.md`](../../pigeon/docs/LOCAL_TESTING.md)), and
