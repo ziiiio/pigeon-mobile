@@ -40,10 +40,10 @@ ed25519 verification) is recorded in `CLAUDE.md`'s server-drift reconciliation.
 `core/deny.toml` mirrors the server's policy: RUSTSEC advisories, a permissive-license
 allowlist (the "no surprise deps" rule), and source restrictions. The `deny` CI job
 (added 2026-11-13, `6f2bbb8`) fails on any **new** advisory. Locally, run
-`cd core && cargo deny check`. *Last run 2026-11-16: advisories, bans, licenses and
+`cd core && cargo deny check`. *Last run 2026-11-20: advisories, bans, licenses and
 sources all ok.*
 
-Five advisories are accepted, each with its reason in `deny.toml`:
+Four advisories are accepted, each with its reason in `deny.toml`:
 
 - **RUSTSEC-2026-0207 / -0208 `libcrux-sha3`**, **RUSTSEC-2026-0212 `libcrux-secrets`**:
   pulled by `pigeon-crypto` → `openmls_rust_crypto` 0.5.1 → `hpke-rs` 0.6.1. These are
@@ -52,15 +52,16 @@ Five advisories are accepted, each with its reason in `deny.toml`:
   entries as the server's.
 - **RUSTSEC-2026-0387 `crypto-bigint`** 0.5.5: comes in only through the P-256/P-384/
   secp256k1 curves, so it is unreachable for X25519 + Ed25519. Same entry as the server's.
-- **RUSTSEC-2026-0459 bundled SQLite WAL page-size bug** (client only, reviewed
-  2026-11-13). Exploiting it needs a crafted database plus `-wal` pair written by a less
-  trusted party. The core only opens its own store in OS-sandboxed app-private storage.
-  It is not upgraded because the fix (rusqlite 0.41 / libsqlite3-sys 0.39) can't share the
-  `e2e/` crate's link graph with the in-process homeserver's `sqlx` (Cargo allows one
-  `links = "sqlite3"` package per graph). Tracked: run e2e's server out of process.
-
-The first four share one fix: the breaking **`openmls_rust_crypto` 0.6 / `hpke-rs` 0.7**
+All four share one fix: the breaking **`openmls_rust_crypto` 0.6 / `hpke-rs` 0.7**
 MLS-stack bump. That bump is shared with the server and tracked there.
+
+**No longer accepted:** RUSTSEC-2026-0459 (bundled SQLite < 3.54, WAL page-size bug),
+accepted 2026-11-13 because a *test* held the app's `rusqlite` at 0.31: the `e2e/` crate
+linked the homeserver in-process, and Cargo allows one SQLite-linking package per binary,
+which the server's (unused) `sqlx` SQLite backend capped below the fix. Fixed 2026-11-20
+by running e2e's server out of process (no shared graph) and moving to **rusqlite 0.43 /
+libsqlite3-sys 0.40 (SQLite 3.54.1)**. This is the precedent for CLAUDE.md's "tests never
+pin dependencies" rule.
 
 **Patched rather than accepted:** `rustls`, `rustls-webpki`, `h2` and `crossbeam-epoch`
 (2026-10-04, `df10024`); `rustls`, `rustls-webpki`, `webpki-roots` and `tokio`

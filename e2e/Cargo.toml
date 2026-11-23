@@ -1,13 +1,16 @@
-# pigeon-mobile-e2e — the Docker-gated oneshot-homeserver end-to-end lane.
+# pigeon-mobile-e2e — the Docker-gated end-to-end lane against a real homeserver.
 #
-# Deliberately a SEPARATE crate, not part of `core/`: it dev-depends on the
-# server's `tests-integration` harness (which spins a real Postgres via
-# testcontainers), so it needs Docker at runtime. Keeping it out of `core/`
-# means the container's fast `cargo test` and the core CI lane never build or
-# run this heavy, Docker-dependent code.
+# Deliberately a SEPARATE crate, not part of `core/`: it runs the real
+# `pigeon-server` binary (built from ../pigeon) on a throwaway Postgres
+# container, so it needs Docker at runtime. Keeping it out of `core/` means the
+# container's fast `cargo test` and the core CI lane never build or run it.
+#
+# The server runs OUT OF PROCESS (tests/support/mod.rs): this crate does not
+# depend on any homeserver crate, so the server's dependency graph never shares
+# a binary with the app's. Linking them together once pinned the app's rusqlite
+# to a vulnerable release (CLAUDE.md, "Tests never pin dependencies").
 #
 # Run it on a host with Docker:  (from this dir)  cargo test
-# It is NOT built by the dev container's core workflow.
 [package]
 name = "pigeon-mobile-e2e"
 version = "0.1.0"
@@ -17,10 +20,6 @@ publish = false
 [dependencies]
 # The crate under test + its typed errors.
 pigeon-mobile-core = { path = "../core" }
-# The homeserver's in-process test harness (real Postgres via testcontainers).
-tests-integration = { path = "../../pigeon/tests/integration" }
-# To bind the harness's axum Router to a real TCP port for reqwest to hit.
-axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde_json = "1"

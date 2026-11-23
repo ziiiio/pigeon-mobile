@@ -68,8 +68,9 @@ cd e2e
 cargo test
 ```
 
-The `e2e/` crate starts the real `pigeon` server in-process with a real Postgres
-(`testcontainers`) and drives the core's FFI functions the same way the apps do:
+The `e2e/` crate builds the real `pigeon-server` binary from `../pigeon`, runs it as a
+separate process on a throwaway `postgres:16` container (started with the `docker` CLI),
+and drives the core's FFI functions over HTTP the same way the apps do:
 
 - `register_login_restore_against_real_homeserver`: session, restore, logout and
   server-side token revocation

@@ -1,12 +1,15 @@
 //! Oneshot-homeserver end-to-end test — the M1 exit gate.
 //!
-//! Unlike the mock-HTTP tests in `core`, this drives the real `pigeon` server
-//! (in-process, over a real TCP socket, backed by a real Postgres spun via
-//! testcontainers) through the core's own FFI functions. It proves the client
-//! half agrees with the actual wire contract, not a canned mock.
+//! Unlike the mock-HTTP tests in `core`, this drives the real `pigeon-server`
+//! binary (a separate process built from `../pigeon`, on a throwaway Postgres
+//! container — see `support/mod.rs`) through the core's own FFI functions, over
+//! real HTTP. It proves the client half agrees with the actual wire contract,
+//! not a canned mock.
 //!
-//! Requires Docker. Run from `e2e/`:  `cargo test`. Not built by the dev
-//! container's core workflow.
+//! Requires Docker and the `../pigeon` checkout. Run from `e2e/`:  `cargo test`.
+//! Not built by the dev container's core workflow.
+
+mod support;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,7 +21,6 @@ use pigeon_mobile_core::session::{
 };
 use pigeon_mobile_core::sync::SyncObserver;
 use pigeon_mobile_core::CoreError;
-use tokio::net::TcpListener;
 
 /// An in-memory key store so the restore path has somewhere to persist to.
 #[derive(Clone, Default)]
@@ -38,22 +40,6 @@ impl KeyStore for MemStore {
         self.map.lock().unwrap().remove(&key);
         Ok(())
     }
-}
-
-/// Boot the in-process homeserver on a real TCP port and return its base URL.
-/// The returned `TestServer` owns the Postgres container — keep it in scope for
-/// the duration of the test.
-async fn spawn() -> anyhow::Result<(String, tests_integration::TestServer)> {
-    let ts = tests_integration::spawn_server().await?;
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let addr = listener.local_addr()?;
-    let router = ts.router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service())
-            .await
-            .expect("server task");
-    });
-    Ok((format!("http://{addr}"), ts))
 }
 
 /// A no-op sync observer. The conversation test polls the store directly rather
@@ -102,7 +88,9 @@ async fn two_clients_hold_a_plaintext_conversation() -> anyhow::Result<()> {
     let _serial = GLOBAL_KEY_STORE.lock().await;
     set_key_store(Box::new(MemStore::default()));
 
-    let (base, _ts) = spawn().await?;
+    // A real pigeon-server process on a throwaway Postgres; dropped at the end.
+    let server = support::spawn().await?;
+    let base = server.base_url.clone();
 
     // Two real accounts on the live server.
     let alice = register(base.clone(), "alice".into(), "hunter2".into()).await?;
@@ -194,7 +182,9 @@ async fn two_clients_exchange_encrypted_messages() -> anyhow::Result<()> {
     let store = MemStore::default();
     let _serial = GLOBAL_KEY_STORE.lock().await;
     set_key_store(Box::new(store.clone()));
-    let (base, _ts) = spawn().await?;
+    // A real pigeon-server process on a throwaway Postgres; dropped at the end.
+    let server = support::spawn().await?;
+    let base = server.base_url.clone();
 
     // Two real accounts; each publishes its device keys on register.
     let alice = register(base.clone(), "alice".into(), "hunter2".into()).await?;
@@ -294,7 +284,9 @@ async fn register_login_restore_against_real_homeserver() -> anyhow::Result<()> 
     let _serial = GLOBAL_KEY_STORE.lock().await;
     set_key_store(Box::new(store.clone()));
 
-    let (base, _ts) = spawn().await?;
+    // A real pigeon-server process on a throwaway Postgres; dropped at the end.
+    let server = support::spawn().await?;
+    let base = server.base_url.clone();
 
     // Register a fresh account — the server stamps the full id + a device id.
     let client = register(base.clone(), "alice".into(), "hunter2".into()).await?;

@@ -152,7 +152,7 @@ private, so every job checks out `../pigeon` (for the path dependencies) with th
 | `core` | ubuntu | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`, plus a Swift-bindings generation smoke check |
 | `deny` | ubuntu | `cargo deny check` over `core/` (register: [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md)) |
 | `android` | ubuntu | `./gradlew assembleDebug`, then `./gradlew testDebugUnitTest` (JDK 25, SDK 36, NDK r28c) |
-| `e2e` | ubuntu | `cargo test` in `e2e/`: the core against a real in-process homeserver on a testcontainers Postgres (the runner's Docker), `SQLX_OFFLINE=true` |
+| `e2e` | ubuntu | `cargo test` in `e2e/`: builds `pigeon-server` from `../pigeon` (`SQLX_OFFLINE=true`, against its committed `.sqlx` cache) and runs it out of process on a `postgres:16` container (the runner's Docker) |
 | `ios` | macos-14 | `ios/build-core.sh`, `ios/run-tests.sh`, `ios/run-app.sh` |
 
 Not in CI: running the apps on an emulator or simulator against a live homeserver (the

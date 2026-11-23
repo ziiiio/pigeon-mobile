@@ -138,9 +138,13 @@ times out. The iOS `AuthView` therefore pre-fills `http://localhost:8008` on the
 
 ### The end-to-end test (needs Docker)
 
-The `e2e/` crate drives the core against a *real* homeserver (spun in-process with a real
-Postgres via `testcontainers`). It lives *outside* `core/` precisely because it needs
-Docker, so the core's fast `cargo test` never pulls it in.
+The `e2e/` crate drives the core against a *real* homeserver: it builds the `pigeon-server`
+binary from `../pigeon` and runs it as a **separate process** on a throwaway Postgres
+container. It lives *outside* `core/` precisely because it needs Docker, so the core's fast
+`cargo test` never pulls it in. *Why a separate process:* the first version linked the
+server into the test binary, and the server's own SQLite-related dependency then capped the
+**app's** SQLite library at a vulnerable version. Tests must never hold a dependency back
+(CLAUDE.md, "The Dependency Rule"), so the server now runs beside the test, not inside it.
 
 ```bash
 cd e2e && cargo test    # requires Docker
@@ -738,8 +742,8 @@ every lane, including iOS, are in [`LOCAL_TESTING.md`](LOCAL_TESTING.md)):
    behaviour without a real homeserver.
 
 3. **The oneshot end-to-end test** (`e2e/`, needs Docker) — drives the core's *actual FFI
-   functions* against a *real* `pigeon` server (in-process, real Postgres via
-   `testcontainers`). It proves the client half agrees with the real wire contract, not a
+   functions* against a *real* `pigeon-server` process (a throwaway Postgres container,
+   started by `e2e/tests/support/mod.rs`). It proves the client half agrees with the real wire contract, not a
    mock. This is the **gold standard for a protocol flow**, and it lives outside `core/` so
    the fast lane never needs Docker. `cd e2e && cargo test`.
 

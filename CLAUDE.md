@@ -63,6 +63,16 @@ If a view model starts parsing events, building request bodies or holding secret
 belongs in the core (the Cardinal Rule). If a view starts calling the core or formatting
 errors, it belongs in the view model.
 
+## The Dependency Rule: tests never pin dependencies
+
+**A test must never be the reason a dependency stays on a vulnerable or outdated version.** That covers every kind: unit, integration, e2e, benches, fixtures and test harnesses, and it covers both the code that ships *and* the test graph itself.
+
+- If a test's linking, setup or tooling stops you upgrading a dependency to fix an advisory, **change the test** (run the other side out of process, replace the harness, remove the coupling), then upgrade. Never accept an advisory or hold a version "because the tests need it".
+- A vulnerable **test-only** dependency is not exempt either: bump or replace it. "Test-only" may explain why an advisory is low-risk for a few days; it is never a standing reason in `core/deny.toml` or SECURITY_REVIEW.md.
+- Prefer test designs that can't create the coupling in the first place: a test lane that needs another repo's server runs that server as a **process**, not as a linked library.
+
+Precedent (2026-11-13 → 2026-11-20): the `e2e/` crate linked the homeserver in-process. Cargo allows one SQLite-linking package per binary, and the server's unused `sqlx` SQLite backend capped `libsqlite3-sys`, so the **app's** `rusqlite` was held at 0.31 with RUSTSEC-2026-0459 accepted. Running the server out of process (`e2e/tests/support/mod.rs`) removed the conflict and the app moved to rusqlite 0.43. The homeserver repo has the same rule (`../pigeon/CLAUDE.md`).
+
 ## The Completeness Rule: no deferred work — if it can be done now, do it now
 
 **Do not defer work you could finish now.** If a piece of a feature is implementable with what already exists — the dependency is present, the wire contract is known, the foundation it needs is built — implement it, completely, in the same change. Do not split doable work into a "later" bucket, leave it as a bare `TODO`, or label it "deferred"/"M-later" to shrink a diff. A stage is done when its endpoints, its error paths, and its tests are all in — not when the happy path compiles.
@@ -141,7 +151,7 @@ Update this section as the project progresses. Claude should refuse to add Phase
 - **M1.4** (`android/app/.../auth/`): the Compose auth UI. `PigeonApp` (an `Application`) installs the two host callbacks once at process start — `LogcatSink` (M0.7) and `AndroidKeyStore` (M1.3, backed by `EncryptedSharedPreferences` → Android Keystore, throwing `KeyStoreException.Backend`). `AuthViewModel` is the thin VM: `restore_session()` on launch (offline-first), then `login`/`register`, holding the opaque `PigeonClient` handle (token stays in-core — Gotcha #1). `AuthScreen` is the homeserver/username/password form with loading + per-error states; `AuthError.authErrorMessage` maps each typed `CoreException` (branching on the `P_` `ErrorCode`, never text) to a user message; `HomeScreen` shows the non-secret `Session`. New Android deps (flagged): `lifecycle-viewmodel-compose`/`lifecycle-runtime-compose`, `kotlinx-coroutines-android`, `androidx.security:security-crypto` (Keystore wrapper — no new crypto path), and `junit` (test). **Validated** by JVM unit tests for the error mapper (`AuthErrorTest`, exhaustive over variants incl. unknown code) and a green `assembleDebug`.
 - **M1.5** (`core/src/session.rs` + `android/app/.../auth/`): logout & token invalidation. An async `PigeonClient.logout()` FFI revokes the token server-side via `POST /logout` (best-effort — like the reference CLI, an unreachable server or already-dead token still clears locally) then wipes the keystore blob; a genuine keystore fault surfaces as `CoreError::Storage`. `HomeScreen` gains a Sign-out action driving `AuthViewModel.logout()`: success drops the `PigeonClient` handle → back to the form; a keystore fault keeps the session live and shows the error to retry (`AuthState.SignedIn` gained `signingOut`/`error`). **Validated** by mock-HTTP tests in `core` (revoke-with-bearer + local clear; clear-even-when-revoke-fails) and the `e2e/` oneshot lane (real server-side revocation proven by re-injecting the pre-logout blob and watching `/account/whoami` reject it). No new deps.
 
-**Validation:** register/login/restore/logout are covered two ways — (1) fast mock-HTTP tests in `core` (`wiremock`, no Docker: request shapes, bearer injection, `P_`-error → typed code, offline-first restore paths); and (2) a real oneshot-homeserver e2e in the **separate `e2e/` crate** (path-deps on `core` + the server's `tests-integration`), which spins the actual `pigeon` server over TCP with a real Postgres via testcontainers and drives the core's FFI. The e2e needs Docker, so it lives OUT of `core/` — the dev container's `cargo test` and the core CI lane never build it. Run it on a host with Docker: `cd e2e && cargo test`. ✅ passing.
+**Validation:** register/login/restore/logout are covered two ways — (1) fast mock-HTTP tests in `core` (`wiremock`, no Docker: request shapes, bearer injection, `P_`-error → typed code, offline-first restore paths); and (2) a real oneshot-homeserver e2e in the **separate `e2e/` crate** (depends only on `core`), which builds and runs the actual `pigeon-server` binary out of process on a throwaway Postgres container and drives the core's FFI over HTTP. The e2e needs Docker, so it lives OUT of `core/` — the dev container's `cargo test` and the core CI lane never build it. Run it on a host with Docker: `cd e2e && cargo test`. ✅ passing.
 
 **Protocol note (learned in M1):** Pigeon has **no client-side server discovery**. `.well-known/pigeon/server` is federation-only (`{"m.server": …}`); there's no client `.well-known`/`m.homeserver`. Clients take the homeserver URL directly (as the reference CLI does) — do not wire discovery into the client.
 
@@ -235,7 +245,7 @@ Stick to these unless you have a specific reason and have discussed it.
 - **FFI**: **UniFFI** (Mozilla) — generates Kotlin & Swift bindings. No hand-written JNI.
 - **HTTP**: `reqwest` with `rustls` (matches the server's client choice).
 - **Crypto**: reuse `pigeon-crypto` (MLS via `openmls`, `openmls_rust_crypto` provider). **Do not add a second crypto path.** Do not roll your own crypto. New crypto deps need flagging *and* must already be approved server-side.
-- **Local store**: SQLite via **`rusqlite` (`bundled`)** (held at 0.31: newer `rusqlite` bundles a `libsqlite3-sys` that can't share a link graph with the homeserver's `sqlx` in `e2e/` — Cargo allows one `links = "sqlite3"` package, counting `sqlx`'s *optional* SQLite backend; RUSTSEC-2026-0459 is accepted in `core/deny.toml` for that reason) — decided & flagged in M2.1 (over `sqlx`: lighter, statically links SQLite for a clean `cargo-ndk` cross-compile, no build-time DB). Secrets/keys go in the platform keystore, *referenced* from the core, not stored in the app DB in clear.
+- **Local store**: SQLite via **`rusqlite` (`bundled`)**, kept current (0.43, SQLite 3.54.1 since 2026-11-20; it was held at 0.31 by the e2e crate's in-process server until that moved out of process — see "The Dependency Rule") — decided & flagged in M2.1 (over `sqlx`: lighter, statically links SQLite for a clean `cargo-ndk` cross-compile, no build-time DB). Secrets/keys go in the platform keystore, *referenced* from the core, not stored in the app DB in clear.
 - **Async**: `tokio`. UniFFI async functions are supported; prefer them over callback soup.
 - **Serialization**: `serde` / `serde_json`. Canonical JSON for anything signed → `pigeon-core::canonical` (Gotcha #4).
 - **Errors**: `thiserror` in the core; surfaced as UniFFI error enums.
@@ -304,6 +314,7 @@ Stick to these unless you have a specific reason and have discussed it.
 
 - Don't put crypto, key handling, event parsing, or API-request construction in Kotlin/Swift.
 - Don't add dependencies (especially crypto, networking, analytics/crash, DB) without flagging them for approval.
+- Don't let a test hold a dependency back, or accept an advisory because of a test (The Dependency Rule).
 - Don't add `unsafe` in the core; don't write new crypto primitives.
 - Don't log/transmit plaintext, tokens, or keys.
 - Don't add Phase N+1 features while in Phase N. A stub/interface for genuinely *blocked* later-phase work is fine; its implementation is not. (This is not licence to defer work you *could* finish now — see "The Completeness Rule".)

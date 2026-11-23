@@ -31,21 +31,6 @@ ignore = [
     # P-256/P-384 ciphersuites and ECDSA. Unreachable: the X25519 + Ed25519
     # suite runs on the curve25519 crates. Same tracked bump as above.
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint via p256/p384/k256: only P-256/P-384/ECDSA paths; Pigeon uses X25519+Ed25519 (tracked: openmls_rust_crypto 0.6)" },
-    # SQLite < 3.54 (bundled by libsqlite3-sys 0.28 via rusqlite 0.31) can
-    # return uninitialised page-cache memory when it opens a database together
-    # with a sibling -wal file of a different page size (reviewed 2026-11-13).
-    # Unreachable on device: the attack needs a crafted db + -wal pair written by
-    # a less-trusted party, and the core only ever opens its OWN store in
-    # OS-sandboxed app-private storage (Android filesDir / iOS Application
-    # Support), which other apps can't write without a sandbox escape.
-    # Why not upgrade: the fix is libsqlite3-sys 0.39 (rusqlite 0.41), but the
-    # e2e crate links this core AND the homeserver (in-process, via
-    # tests-integration) into one binary, and Cargo allows one `links = "sqlite3"`
-    # package per graph — counting sqlx's *unused, optional* SQLite backend, whose
-    # libsqlite3-sys range stops below 0.38 even in sqlx 0.9.0. Tracked: lift by
-    # running e2e's server out-of-process (no shared link graph), or when sqlx
-    # accepts libsqlite3-sys >= 0.39.
-    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite WAL page-size bug: needs attacker-written db+wal; the core opens only its own sandboxed store (tracked: e2e out-of-process server, or sqlx accepting libsqlite3-sys >= 0.39)" },
 ]
 
 [licenses]

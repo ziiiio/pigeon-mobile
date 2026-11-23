@@ -135,10 +135,10 @@ jobs:
         run: ./gradlew testDebugUnitTest --stacktrace
 
   # End-to-end lane: the core's FFI driven against a real homeserver. The e2e
-  # crate boots the actual pigeon server in-process (via ../pigeon's
-  # tests-integration) on a throwaway Postgres from testcontainers, which uses the
-  # runner's Docker daemon (ubuntu-latest ships one). SQLX_OFFLINE: the server's
-  # sqlx query macros compile against pigeon's committed .sqlx cache, as in its own CI.
+  # harness builds the pigeon-server binary from ../pigeon and runs it OUT OF
+  # PROCESS on a throwaway postgres:16 container (docker CLI; ubuntu-latest ships
+  # Docker). SQLX_OFFLINE: the server's sqlx query macros compile against pigeon's
+  # committed .sqlx cache, as in its own CI. Both target dirs are cached.
   e2e:
     runs-on: ubuntu-latest
     env:
@@ -156,7 +156,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: pigeon-mobile/e2e
+          workspaces: |
+            pigeon-mobile/e2e
+            pigeon
 
       - name: e2e (real homeserver + Postgres)
         working-directory: pigeon-mobile/e2e

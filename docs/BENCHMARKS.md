@@ -100,6 +100,12 @@ docker compose exec android bash -c 'cd android && ./gradlew assembleRelease'
 unzip -lv android/app/build/outputs/apk/release/app-release-unsigned.apk | grep core.so
 ```
 
+### rusqlite 0.31 → 0.43: 2026-11-20
+
+Dependency bump (bundled SQLite 3.45 → 3.54.1, fixing RUSTSEC-2026-0459). The packaged
+debug `.so` grows by about 0.1 MiB: arm64 16 975 688 B (was 16 877 520), x86_64
+19 832 672 B (was 19 730 928). Measured with `unzip -lv` on a clean `assembleDebug`.
+
 ### iOS core
 
 | Artifact | Size | Notes |

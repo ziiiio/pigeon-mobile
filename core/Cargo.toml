@@ -56,7 +56,7 @@ base64 = "0.22"
 # path; heavy scans can offload via `spawn_blocking`. (Decision flagged &
 # approved: rusqlite over sqlx — lighter tree, no build-time DB, matches
 # matrix-rust-sdk's SQLite store.)
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 
 # Reused homeserver crates — the single source of crypto + protocol logic.
 # Path deps into the sibling `pigeon` repo (see ../docs/ARCHITECTURE.md §4.1).
