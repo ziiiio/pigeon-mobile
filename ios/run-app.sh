@@ -93,14 +93,23 @@ echo "==> Launching + capturing os_log"
 xcrun simctl spawn "$sim_udid" log stream --level info --style compact \
   --predicate "subsystem == \"$SUBSYSTEM\"" > "$logfile" 2>&1 &
 stream_pid=$!
-sleep 1
+# Wait for the stream to attach (it prints a "Filtering the log data…" header
+# first) before launching, or the marker can be logged before anyone listens.
+# On a freshly booted CI simulator this takes far longer than on a warm Mac, so
+# the waits below are condition-based with generous ceilings: they return as
+# soon as the condition holds, so local runs stay fast.
+for _ in $(seq 1 60); do
+  [ -s "$logfile" ] && break
+  sleep 1
+done
 # --console-pty keeps launch attached; we background it and check liveness below.
 app_pid="$(xcrun simctl launch "$sim_udid" "$BUNDLE_ID" | awk '{print $NF}')"
 echo "    launched pid $app_pid"
 
-# Wait (up to ~15s) for the callbacks-installed record.
+# Wait (up to 90s) for the callbacks-installed record. CI runners have taken
+# 18s just to return from `simctl launch` right after boot.
 ok=0
-for _ in $(seq 1 15); do
+for _ in $(seq 1 90); do
   if grep -q "$INSTALL_MARKER" "$logfile"; then ok=1; break; fi
   sleep 1
 done
@@ -121,6 +130,11 @@ echo "-------------------------------------"
 
 if [ "$ok" -ne 1 ]; then
   echo "FAIL: '$INSTALL_MARKER' not observed — the core callbacks did not install" >&2
+  # Diagnostics: everything the stream captured (empty = it never attached),
+  # and whether the app process is still up.
+  echo "---- full stream output (last 40 lines) ----" >&2
+  tail -n 40 "$logfile" >&2 || true
+  echo "---- app alive: $alive ----" >&2
   rm -f "$logfile"; exit 1
 fi
 if [ "$alive" -ne 1 ]; then
