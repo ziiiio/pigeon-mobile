@@ -167,7 +167,7 @@ gh secret set PIGEON_DEPLOY_KEY < /tmp/pigeon_ci_key && rm /tmp/pigeon_ci_key /t
 |---|---|---|
 | `core` | ubuntu | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`, plus a Swift-bindings generation smoke check |
 | `deny` | ubuntu | `cargo deny check` over `core/` (register: [`SECURITY_REVIEW.md`](SECURITY_REVIEW.md)) |
-| `android` | ubuntu | `./gradlew assembleDebug`, then `./gradlew testDebugUnitTest` (JDK 25, SDK 36, NDK r28c) |
+| `android` | ubuntu | `./gradlew assembleDebug`, then `./gradlew testDebugUnitTest` (JDK 25 via `setup-java@v5`; SDK 36 + NDK r28c via `sdkmanager` after `setup-android@v4`, which needs v4+ since Google removed the legacy `tools` package v3 installed) |
 | `e2e` | ubuntu | `cargo test` in `e2e/`: builds `pigeon-server` from `../pigeon` (`SQLX_OFFLINE=true`, against its committed `.sqlx` cache) and runs it out of process on a `postgres:16` container (the runner's Docker) |
 | `ios` | macos-15 | `ios/build-core.sh`, `ios/run-tests.sh`, `ios/run-app.sh` |
 
