@@ -176,14 +176,16 @@ jobs:
   # `xcodebuild -create-xcframework` is macOS-only. The Linux `core` lane already
   # smoke-checks that the Swift bindings *generate*; this lane proves they build.
   ios:
-    # macos-14 was retired by GitHub (jobs failed with "The configuration
-    # 'macos-14-arm64-us-default' is not supported"), and on macos-15 two of three
-    # runs were never given a runner ("The job was not acquired by Runner of type
-    # hosted even after multiple attempts"). macos-26 is the current generation
-    # (what macos-latest points at), where GitHub keeps its macOS capacity. Pinned
-    # rather than macos-latest so the image never changes silently. The project
-    # needs only Swift 5.9 tools and an iOS 15 target, so any current Xcode works.
-    runs-on: macos-26
+    # Runner history: macos-14 was retired ("The configuration
+    # 'macos-14-arm64-us-default' is not supported"). On macos-15 and macos-26
+    # (both Apple Silicon) three of four runs on 2026-11-24 were never given a
+    # runner ("The job was not acquired by Runner of type hosted even after
+    # multiple attempts"), with GitHub's own annotation: "Due to capacity
+    # constraints, jobs targeting macOS arm64 runners may experience longer queue
+    # times." So, TEMPORARILY, the Intel image: build-core.sh already lipo's an
+    # x86_64 slice into the simulator library, so nothing else changes. Move back
+    # to macos-26 once arm64 capacity recovers; GitHub is phasing out Intel images.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v5
         with:
