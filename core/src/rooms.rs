@@ -397,11 +397,29 @@ impl PigeonClient {
                     "size": size,
                 },
             });
-            let ciphertext_b64 = e2ee.encrypt(&room_id, &content.to_string())?;
+            let plaintext = content.to_string();
+            let ciphertext_b64 = e2ee.encrypt(&room_id, &plaintext)?;
             let event = serde_json::json!({ "algorithm": "p.mls.1", "ciphertext": ciphertext_b64 });
-            self.api
+            // MLS can't decrypt our own messages, so keep the plaintext as a local
+            // echo: it is all the sender will ever have to show this image. While
+            // it's in flight the decrypt pass leaves our own ciphertext alone; the
+            // ack promotes it onto the real event (even if /sync got there first).
+            let echo = self.store.insert_own_encrypted_echo(
+                &room_id,
+                &self.session().user_id,
+                &plaintext,
+            )?;
+            match self
+                .api
                 .send_event(&room_id, "p.room.encrypted", &next_txn_id(), &event)
-                .await?;
+                .await
+            {
+                Ok(event_id) => self.store.confirm_own_echo(&echo, &event_id)?,
+                Err(err) => {
+                    self.store.discard_own_echo(&echo)?;
+                    return Err(err.into());
+                }
+            }
         } else {
             let uri = self.upload_media(bytes, mimetype.clone()).await?;
             let content = serde_json::json!({
@@ -1267,6 +1285,171 @@ mod tests {
                 .as_deref(),
             Some("secret hi")
         );
+    }
+
+    /// Log in as alice against `server` with an encrypted group for `!enc:s`, and
+    /// mount the media upload. Shared by the own-encrypted-image tests.
+    async fn alice_with_encrypted_room(
+        server: &wiremock::MockServer,
+    ) -> std::sync::Arc<PigeonClient> {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/client/v1/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user_id": "@alice:s", "device_id": "D", "access_token": "tok"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/_pigeon/media/v1/upload"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "content_uri": "pigeon://s/ct1" })),
+            )
+            .mount(server)
+            .await;
+        let alice = crate::session::login(server.uri(), "alice".into(), "p".into())
+            .await
+            .unwrap();
+        alice.e2ee.as_ref().unwrap().create_group("!enc:s").unwrap();
+        alice
+    }
+
+    /// The sender's view of its own encrypted image: one image event under
+    /// `event_id`, readable, with no "Unable to decrypt" placeholder.
+    fn assert_own_image_readable(alice: &PigeonClient, event_id: &str) {
+        let tl = alice.timeline("!enc:s".into(), 10, None).unwrap();
+        assert_eq!(tl.len(), 1, "one event — the echo didn't linger: {tl:?}");
+        let ev = &tl[0];
+        assert_eq!(ev.event_id, event_id);
+        assert_eq!(ev.system_text, None, "no unable-to-decrypt placeholder");
+        let image = ev.image.as_ref().expect("the sender still sees its image");
+        assert_eq!(image.uri, "pigeon://s/ct1");
+        assert!(image.key.is_some(), "the per-file key is kept to show it");
+        assert_eq!(ev.body.as_deref(), Some("pic"));
+        assert!(!ev.pending && !ev.failed);
+    }
+
+    // The bug seen on-device (2026-11-24): an encrypted image rendered "Unable to
+    // decrypt" for its own sender. send_image sent the ciphertext directly and
+    // kept no plaintext, so when /sync brought the event back the decrypt pass
+    // tried MLS on our own message ("Cannot decrypt own messages").
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn own_encrypted_image_stays_readable_after_sync() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let alice = alice_with_encrypted_room(&server).await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.encrypted/.+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "event_id": "$img" })))
+            .mount(&server)
+            .await;
+
+        alice
+            .send_image(
+                "!enc:s".into(),
+                b"pixels".to_vec(),
+                "image/png".into(),
+                4,
+                3,
+                "pic".into(),
+            )
+            .await
+            .unwrap();
+
+        // The authoritative event arrives on the next sync; the decrypt pass runs.
+        let sent = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.url.path().contains("/send/p.room.encrypted/"))
+            .unwrap();
+        let content: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+        alice
+            .store
+            .apply_events(&[json!({
+                "event_id": "$img", "room_id": "!enc:s", "sender": "@alice:s",
+                "type": "p.room.encrypted", "origin_server_ts": 100, "depth": 5,
+                "content": content
+            })])
+            .unwrap();
+        alice.process_inbound_mls().unwrap();
+
+        assert_own_image_readable(&alice, "$img");
+        // Nothing is left for a later pass to (fail to) decrypt.
+        assert!(!alice.process_inbound_mls().unwrap());
+    }
+
+    // Same, when /sync delivers our image before the send is acked (the decrypt
+    // pass runs in between, as the concurrent sync loop does on a device).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn own_encrypted_image_stays_readable_when_sync_beats_the_ack() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        let alice = alice_with_encrypted_room(&server).await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.encrypted/.+$"))
+            .respond_with(SyncBeatsAck(alice.clone()))
+            .mount(&server)
+            .await;
+
+        alice
+            .send_image(
+                "!enc:s".into(),
+                b"pixels".to_vec(),
+                "image/png".into(),
+                4,
+                3,
+                "pic".into(),
+            )
+            .await
+            .unwrap();
+
+        assert_own_image_readable(&alice, "$real");
+        assert!(!alice.process_inbound_mls().unwrap());
+    }
+
+    // A failed send leaves no echo behind (the caller gets the error, as before).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn failed_encrypted_image_send_leaves_no_echo() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let alice = alice_with_encrypted_room(&server).await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r".*/send/p\.room\.encrypted/.+$"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "errcode": "P_FORBIDDEN", "error": "not in room"
+            })))
+            .mount(&server)
+            .await;
+
+        let err = alice
+            .send_image(
+                "!enc:s".into(),
+                b"pixels".to_vec(),
+                "image/png".into(),
+                4,
+                3,
+                "pic".into(),
+            )
+            .await;
+        assert!(err.is_err());
+        assert!(alice
+            .timeline("!enc:s".into(), 10, None)
+            .unwrap()
+            .is_empty());
+        assert!(!alice.store.has_pending_send("!enc:s").unwrap());
     }
 
     // --- Encrypted event rendering (M3.5) ------------------------------------

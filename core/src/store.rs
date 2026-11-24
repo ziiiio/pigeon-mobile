@@ -360,6 +360,7 @@ impl Store {
         let cipher = Cipher { key };
         migrate(&conn, &cipher)?;
         check_key(&conn, &cipher)?;
+        fail_interrupted_sends(&conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
             cipher,
@@ -677,14 +678,17 @@ impl Store {
         Ok(out)
     }
 
-    /// Whether `room_id` has a queued send not yet acknowledged by the server.
-    /// The decrypt pass uses it to leave our own just-sent ciphertext pending
-    /// while the ack (which carries its plaintext — see
-    /// [`resolve_send`](Self::resolve_send)) is still in flight.
+    /// Whether `room_id` has a send not yet acknowledged by the server: a queued
+    /// text message, or a direct encrypted send (an image) whose echo is still in
+    /// flight. The decrypt pass uses it to leave our own just-sent ciphertext
+    /// pending while the ack (which carries its plaintext — see
+    /// [`resolve_send`](Self::resolve_send) and
+    /// [`confirm_own_echo`](Self::confirm_own_echo)) is still in flight.
     pub fn has_pending_send(&self, room_id: &str) -> Result<bool, StoreError> {
         let guard = self.lock();
         let pending: i64 = guard.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pending_sends WHERE room_id = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM pending_sends WHERE room_id = ?1)
+                 OR EXISTS(SELECT 1 FROM events WHERE room_id = ?1 AND local = 1)",
             [room_id],
             |r| r.get(0),
         )?;
@@ -712,42 +716,154 @@ impl Store {
             )
             .optional()?;
         if let Some((provisional, sealed_body)) = pending {
-            // The plaintext, re-sealed for the row it ends up on (the real id).
             let body = self.cipher.open(&sealed_body, txn_id)?;
-            let sealed_for_real = self.cipher.seal(&body, real_event_id)?;
-            let real_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)",
-                [real_event_id],
-                |r| r.get::<_, i64>(0),
-            )? != 0;
-            if real_exists {
-                // Sync raced ahead of the ack: keep our plaintext on the real
-                // event if it's ciphertext, then drop the now-redundant echo.
-                tx.execute(
-                    "UPDATE events SET decrypted = ?2, decrypt_state = ?3
-                      WHERE event_id = ?1 AND type = 'p.room.encrypted'",
-                    rusqlite::params![real_event_id, sealed_for_real, DECRYPT_OK],
-                )?;
-                tx.execute("DELETE FROM events WHERE event_id = ?1", [&provisional])?;
-            } else {
-                // Promote the echo to the confirmed event in place — rewrite both
-                // the column and the payload's own `event_id` (a timeline read
-                // rebuilds the event from the payload), and clear the local flag.
-                // An encrypted room's echo carries its sealed body in `decrypted`,
-                // bound to the provisional id: re-bind it to the real one.
-                tx.execute(
-                    "UPDATE events
-                        SET event_id = ?1,
-                            local = 0,
-                            payload = json_set(payload, '$.event_id', ?1),
-                            decrypted = CASE WHEN decrypted IS NULL THEN NULL ELSE ?3 END
-                      WHERE event_id = ?2",
-                    rusqlite::params![real_event_id, provisional, sealed_for_real],
-                )?;
-            }
+            self.promote_echo(&tx, &provisional, real_event_id, &body)?;
         }
         tx.execute("DELETE FROM pending_sends WHERE txn_id = ?1", [txn_id])?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Turn the local echo `provisional` into the server-confirmed event
+    /// `real_event_id`, keeping `plaintext` readable on it. Shared by queued text
+    /// sends ([`resolve_send`](Self::resolve_send)) and direct encrypted sends
+    /// ([`confirm_own_echo`](Self::confirm_own_echo)).
+    ///
+    /// When sync raced ahead with our own **encrypted** event, the echo's
+    /// plaintext is the only copy we will ever have of it — MLS can't decrypt a
+    /// device's own messages — so it is carried onto the real event as its cached
+    /// plaintext before the echo goes (overriding a failed decrypt attempt the
+    /// decrypt pass may already have made).
+    fn promote_echo(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        provisional: &str,
+        real_event_id: &str,
+        plaintext: &str,
+    ) -> Result<(), StoreError> {
+        // The plaintext, re-sealed for the row it ends up on (the real id).
+        let sealed_for_real = self.cipher.seal(plaintext, real_event_id)?;
+        let real_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)",
+            [real_event_id],
+            |r| r.get::<_, i64>(0),
+        )? != 0;
+        if real_exists {
+            // Sync raced ahead of the ack: keep our plaintext on the real event
+            // if it's ciphertext, then drop the now-redundant echo.
+            tx.execute(
+                "UPDATE events SET decrypted = ?2, decrypt_state = ?3
+                  WHERE event_id = ?1 AND type = 'p.room.encrypted'",
+                rusqlite::params![real_event_id, sealed_for_real, DECRYPT_OK],
+            )?;
+            tx.execute("DELETE FROM events WHERE event_id = ?1", [provisional])?;
+        } else {
+            // Promote the echo to the confirmed event in place — rewrite both the
+            // column and the payload's own `event_id` (a timeline read rebuilds
+            // the event from the payload), and clear the local flag. An encrypted
+            // room's echo carries its sealed plaintext in `decrypted`, bound to
+            // the provisional id: re-bind it to the real one.
+            tx.execute(
+                "UPDATE events
+                    SET event_id = ?1,
+                        local = 0,
+                        payload = json_set(payload, '$.event_id', ?1),
+                        decrypted = CASE WHEN decrypted IS NULL THEN NULL ELSE ?3 END
+                  WHERE event_id = ?2",
+                rusqlite::params![real_event_id, provisional, sealed_for_real],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Write a local echo for an encrypted message we send **directly** rather
+    /// than through the queue — today an image (`send_image`), whose content
+    /// references an upload that must exist first. `plaintext` is the message
+    /// content exactly as encrypted (the `p.image` JSON), sealed in `decrypted`
+    /// so the echo renders like any decrypted event. Returns the echo's
+    /// provisional event id for [`confirm_own_echo`](Self::confirm_own_echo) or
+    /// [`discard_own_echo`](Self::discard_own_echo).
+    ///
+    /// The echo is the only plaintext the sender will ever have of this message
+    /// (MLS can't decrypt our own ciphertext), and while it exists
+    /// [`has_pending_send`](Self::has_pending_send) holds our own ciphertext in
+    /// the room back from the decrypt pass.
+    pub fn insert_own_encrypted_echo(
+        &self,
+        room_id: &str,
+        sender: &str,
+        plaintext: &str,
+    ) -> Result<String, StoreError> {
+        let (_, event_id) = next_send_ids();
+        let ts = now_millis();
+        let mut guard = self.lock();
+        let tx = guard.transaction()?;
+        let depth: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(depth), 0) + 1 FROM events WHERE room_id = ?1",
+            [room_id],
+            |r| r.get(0),
+        )?;
+        // No ciphertext in the payload: the echo is already "decrypted".
+        let payload = serde_json::json!({
+            "event_id": event_id,
+            "room_id": room_id,
+            "sender": sender,
+            "type": "p.room.encrypted",
+            "origin_server_ts": ts,
+            "depth": depth,
+            "content": { "algorithm": "p.mls.1" },
+        });
+        tx.execute(
+            "INSERT INTO events
+               (event_id, room_id, sender, type, state_key, origin_server_ts, depth,
+                payload, local, decrypted, decrypt_state)
+             VALUES (?1, ?2, ?3, 'p.room.encrypted', NULL, ?4, ?5, ?6, 1, ?7, ?8)",
+            rusqlite::params![
+                event_id,
+                room_id,
+                sender,
+                ts,
+                depth,
+                payload.to_string(),
+                self.cipher.seal(plaintext, &event_id)?,
+                DECRYPT_OK
+            ],
+        )?;
+        tx.commit()?;
+        Ok(event_id)
+    }
+
+    /// The server accepted a direct encrypted send under `real_event_id`: promote
+    /// its echo, keeping the plaintext (see [`promote_echo`](Self::promote_echo)).
+    /// A no-op if the echo is gone.
+    pub fn confirm_own_echo(
+        &self,
+        provisional: &str,
+        real_event_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut guard = self.lock();
+        let tx = guard.transaction()?;
+        let sealed: Option<Option<String>> = tx
+            .query_row(
+                "SELECT decrypted FROM events WHERE event_id = ?1 AND local = 1",
+                [provisional],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(Some(sealed)) = sealed {
+            let plaintext = self.cipher.open(&sealed, provisional)?;
+            self.promote_echo(&tx, provisional, real_event_id, &plaintext)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A direct encrypted send failed: drop its echo (the caller reports the error).
+    pub fn discard_own_echo(&self, provisional: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "DELETE FROM events WHERE event_id = ?1 AND local = 1",
+            [provisional],
+        )?;
         Ok(())
     }
 
@@ -908,6 +1024,22 @@ fn fold_state(conn: &Connection, ev: &StoredEvent) -> Result<(), StoreError> {
            event_id = excluded.event_id, depth = excluded.depth
          WHERE excluded.depth >= room_state.depth",
         rusqlite::params![ev.room_id, ev.event_type, state_key, ev.event_id, ev.depth],
+    )?;
+    Ok(())
+}
+
+/// Mark "not sent" every in-flight echo whose send can't still complete: a
+/// direct encrypted send (an image) interrupted by the app being killed between
+/// writing its echo and the server's answer. Queued text sends keep their
+/// `pending_sends` row and are retried, so they're left alone. Without this such
+/// an echo would show "Sending…" forever and, through
+/// [`Store::has_pending_send`], keep our own ciphertext in that room from ever
+/// being decrypt-checked.
+fn fail_interrupted_sends(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE events SET local = 2
+          WHERE local = 1 AND event_id NOT IN (SELECT event_id FROM pending_sends)",
+        [],
     )?;
     Ok(())
 }
@@ -1707,6 +1839,91 @@ mod tests {
         assert!(!store.has_pending_send("!other:s").unwrap());
         store.resolve_send(&txn, "$real").unwrap();
         assert!(!store.has_pending_send("!r:s").unwrap());
+    }
+
+    // A direct encrypted send (an image) counts as pending while its echo is in
+    // flight, so the decrypt pass leaves our own ciphertext alone until the ack.
+    #[test]
+    fn own_encrypted_echo_is_pending_until_confirmed_or_discarded() {
+        let store = Store::open_in_memory().unwrap();
+        let echo = store
+            .insert_own_encrypted_echo("!r:s", "@me:s", r#"{"msgtype":"p.image"}"#)
+            .unwrap();
+        assert!(store.has_pending_send("!r:s").unwrap());
+        assert!(
+            store.pending_mls().unwrap().is_empty(),
+            "the echo needs no decrypting"
+        );
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl[0].decrypted.as_deref(), Some(r#"{"msgtype":"p.image"}"#));
+        assert_eq!(tl[0].send_state, SendState::Sending);
+
+        store.confirm_own_echo(&echo, "$real").unwrap();
+        assert!(!store.has_pending_send("!r:s").unwrap());
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].event_id, "$real");
+        assert_eq!(tl[0].decrypted.as_deref(), Some(r#"{"msgtype":"p.image"}"#));
+        assert_eq!(tl[0].send_state, SendState::Confirmed);
+
+        let echo = store
+            .insert_own_encrypted_echo("!r:s", "@me:s", "{}")
+            .unwrap();
+        store.discard_own_echo(&echo).unwrap();
+        assert!(!store.has_pending_send("!r:s").unwrap());
+        assert_eq!(store.timeline("!r:s", 10, None).unwrap().len(), 1);
+    }
+
+    // The ack arrives after /sync delivered our own image and the decrypt pass
+    // already marked it undecryptable: the echo's plaintext repairs it.
+    #[test]
+    fn confirm_own_echo_repairs_an_own_event_already_marked_undecryptable() {
+        let store = Store::open_in_memory().unwrap();
+        let echo = store
+            .insert_own_encrypted_echo("!r:s", "@me:s", r#"{"msgtype":"p.image"}"#)
+            .unwrap();
+        store
+            .apply_events(&[encrypted("$real", "!r:s", 9, "CT")])
+            .unwrap();
+        store.set_decrypt_failed("$real").unwrap();
+
+        store.confirm_own_echo(&echo, "$real").unwrap();
+        let tl = store.timeline("!r:s", 10, None).unwrap();
+        assert_eq!(
+            tl.len(),
+            1,
+            "the echo is dropped in favour of the real event"
+        );
+        assert_eq!(tl[0].event_id, "$real");
+        assert!(!tl[0].decrypt_failed);
+        assert_eq!(tl[0].decrypted.as_deref(), Some(r#"{"msgtype":"p.image"}"#));
+    }
+
+    // The app was killed mid image send: on reopen its echo is "not sent" (it
+    // can't complete) and no longer holds the room's decrypt pass back. A queued
+    // text send survives as pending — it is retried.
+    #[test]
+    fn interrupted_direct_send_is_marked_failed_on_reopen() {
+        let dir = std::env::temp_dir().join(format!("pigeon-echo-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("echo.sqlite3");
+        let _ = std::fs::remove_file(&path);
+        {
+            let store = Store::open(&path, TEST_KEY.to_vec()).unwrap();
+            store
+                .insert_own_encrypted_echo("!img:s", "@me:s", "{}")
+                .unwrap();
+            store.queue_send("!txt:s", "@me:s", "queued").unwrap();
+        }
+        let store = Store::open(&path, TEST_KEY.to_vec()).unwrap();
+        let img = store.timeline("!img:s", 10, None).unwrap();
+        assert_eq!(img[0].send_state, SendState::Failed);
+        assert!(!store.has_pending_send("!img:s").unwrap());
+        let txt = store.timeline("!txt:s", 10, None).unwrap();
+        assert_eq!(txt[0].send_state, SendState::Sending);
+        assert!(store.has_pending_send("!txt:s").unwrap());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- Encrypted-message plaintext cache (M3.5) ----------------------------

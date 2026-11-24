@@ -440,6 +440,15 @@ encrypted room encrypts under a fresh per-file key (`E2ee.encrypt_media` →
 and puts the URL + key inside an E2EE'd `p.image` message (the key is never uploaded).
 `download_image` decrypts in-core (the key never leaves it — the Cardinal Rule).
 
+One trap here: **a device can't decrypt its own MLS messages.** A text send keeps its
+plaintext in the queued local echo, but an image is sent directly (its upload must exist
+first), so `send_image` writes its own echo — `store.insert_own_encrypted_echo`, holding the
+`p.image` JSON sealed in `decrypted` — before sending, and `confirm_own_echo` promotes it onto
+the real event when the server answers (the same `promote_echo` step `resolve_send` uses, so
+it also works when `/sync` delivers the event first). While the echo is in flight,
+`has_pending_send` keeps the decrypt pass off our own ciphertext. Without the echo the
+sender saw "⚠ Unable to decrypt" on every image it sent.
+
 ---
 
 ## Part 4 — The FFI boundary (how Rust reaches Kotlin)
