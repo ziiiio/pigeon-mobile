@@ -177,9 +177,13 @@ jobs:
   # smoke-checks that the Swift bindings *generate*; this lane proves they build.
   ios:
     # macos-14 was retired by GitHub (jobs failed with "The configuration
-    # 'macos-14-arm64-us-default' is not supported"). The project needs only
-    # Swift 5.9 tools and an iOS 15 target, so any current image's Xcode works.
-    runs-on: macos-15
+    # 'macos-14-arm64-us-default' is not supported"), and on macos-15 two of three
+    # runs were never given a runner ("The job was not acquired by Runner of type
+    # hosted even after multiple attempts"). macos-26 is the current generation
+    # (what macos-latest points at), where GitHub keeps its macOS capacity. Pinned
+    # rather than macos-latest so the image never changes silently. The project
+    # needs only Swift 5.9 tools and an iOS 15 target, so any current Xcode works.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
         with:
